@@ -39,5 +39,11 @@ that makes them fail, and the test rows to add. Keep the rules you set non-negot
 protect data. After about three rounds, take the task over.
 
 ## Landing
-Workers cannot commit. Commit from the worktree yourself, squash if your repository does, run the full gate, and
-merge under your repository's rules. Record the task's cost from `orchestra-worker summary` if you track it.
+Workers cannot commit. Commit from the worktree yourself, run the full gate, and merge under your repository's rules.
+Record the task's cost from `orchestra-worker summary` if you track it.
+
+**Squash by rebasing, never by resetting.** A worktree is a snapshot of when the task started. If you squash with
+`git reset --soft origin/main` from it, every file that changed on `main` since then is silently reverted in your
+commit. Instead: commit in the worktree, `git rebase origin/main`, then squash (`git rebase -i` or
+`git merge --squash` onto a fresh branch from `origin/main`), and check `git diff --stat origin/main` lists only the
+task's paths before pushing. (This happened in the first production pilot: a squash reverted unrelated docs.)
