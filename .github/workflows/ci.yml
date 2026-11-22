@@ -1,0 +1,17 @@
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bubblewrap and shellcheck
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap shellcheck
+      - name: Allow unprivileged user namespaces (Ubuntu 24.04 restricts them via AppArmor)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: shellcheck
+        run: shellcheck -x -S warning bin/orchestra-worker lib/harness/*.sh install.sh tests/run.sh tests/fixtures/*.sh
+      - name: tests
+        run: tests/run.sh

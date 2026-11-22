@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# orchestra-worker: run one sandboxed worker agent on one task, then check what it did.
+#
+#   orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>] [--dry-run]
+#   orchestra-worker summary <task-id> [--worktree <dir>]
+#
+# The orchestrator (a stronger model, or you) decides; the worker implements. See docs/design.md.
+# Exit codes: 0 ok · 2 usage/config error · 3 model policy violation · 4 no or invalid report · 124 timeout ·
+# anything else: the harness's own exit code.
+set -euo pipefail
+
+# Everything lives in main(), called on the last line: bash then parses the whole file before running it, so
+# editing this script while a worker runs cannot corrupt that run (bash otherwise reads scripts lazily).
+main() {
+  local here; here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+  local cmd=${1:-}; shift || true
+  case "$cmd" in
+    run) cmd_run "$here" "$@" ;;
+    summary) cmd_summary "$here" "$@" ;;
+    -h|--help|help|"") sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
+    *) die "unknown command: $cmd (try: run, summary)" ;;
+  esac
+}
+
+die() { echo "orchestra-worker: $*" >&2; exit 2; }
+log() { echo "orchestra-worker: $*" >&2; }
+
+# Config: built-in defaults < ~/.config/orchestra/config.env < <repo>/.orchestra/config.env < the environment.
+load_config() {
+  local repo=$1 f
+  local -A env_set=()
+  local v; for v in $(compgen -e | grep '^ORCHESTRA_' || true); do env_set[$v]=${!v}; done
+  for f in "${XDG_CONFIG_HOME:-$HOME/.config}/orchestra/config.env" "$repo/.orchestra/config.env"; do
+    # shellcheck disable=SC1090
+    [ -f "$f" ] && . "$f"
+  done
+  for v in "${!env_set[@]}"; do printf -v "$v" '%s' "${env_set[$v]}"; done
+  ORCHESTRA_HARNESS=${ORCHESTRA_HARNESS:-pi}
+  ORCHESTRA_MODEL=${ORCHESTRA_MODEL:-}
+  ORCHESTRA_ALLOWED_MODELS=${ORCHESTRA_ALLOWED_MODELS:-$ORCHESTRA_MODEL}
+  ORCHESTRA_THINKING=${ORCHESTRA_THINKING:-low}
+  ORCHESTRA_TIMEOUT=${ORCHESTRA_TIMEOUT:-45m}
+  ORCHESTRA_KEY_ENV=${ORCHESTRA_KEY_ENV:-}
+  ORCHESTRA_KEY_CMD=${ORCHESTRA_KEY_CMD:-}
+  ORCHESTRA_SANDBOX=${ORCHESTRA_SANDBOX:-bwrap}
+  ORCHESTRA_DEVENV_CMD=${ORCHESTRA_DEVENV_CMD:-}
+  ORCHESTRA_WORKTREE_CMD=${ORCHESTRA_WORKTREE_CMD:-}
+  ORCHESTRA_CHECKS=${ORCHESTRA_CHECKS:-the test and lint commands documented in the repository}
+  ORCHESTRA_RW_BINDS=${ORCHESTRA_RW_BINDS:-}
+  ORCHESTRA_RO_BINDS=${ORCHESTRA_RO_BINDS:-}
+  [ -n "$ORCHESTRA_MODEL" ] || die "set ORCHESTRA_MODEL (provider/model, e.g. deepseek/deepseek-flash) in config.env"
+}
+
+cmd_run() {
+  local here=$1; shift
+  local task="" spec="" wt="" feedback="" dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --spec) spec=${2:?}; shift 2 ;;
+      --worktree) wt=${2:?}; shift 2 ;;
+      --feedback) feedback=${2:?}; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      -*) die "unknown option $1" ;;
+      *) [ -z "$task" ] || die "one task id only"; task=$1; shift ;;
+    esac
+  done
+  [ -n "$task" ] || die "usage: orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>]"
+  [[ $task =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
+
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  load_config "$repo"
+  local harness_file="$here/lib/harness/$ORCHESTRA_HARNESS.sh"
+  case "$ORCHESTRA_HARNESS" in */*) harness_file=$(realpath -m "$ORCHESTRA_HARNESS") ;; esac   # a path: custom harness
+  [ -f "$harness_file" ] || die "unknown harness '$ORCHESTRA_HARNESS' (lib/harness/*.sh, or a path to a .sh file)"
+  # shellcheck disable=SC1090
+  . "$harness_file"
+  model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
+
+  # Worktree: one per task, next to the repository unless given.
+  local common; common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
+  [ -n "$wt" ] || wt="$(dirname "$repo")/$(basename "$repo")-worktrees/$task"
+  wt=$(realpath -m "$wt")
+  if [ ! -d "$wt" ]; then
+    [ -z "$feedback" ] || die "$wt does not exist: nothing to give feedback to"
+    if [ -n "$ORCHESTRA_WORKTREE_CMD" ]; then
+      (cd "$repo" && bash -c "${ORCHESTRA_WORKTREE_CMD//\{task\}/$task}") >&2
+    else
+      git -C "$repo" worktree add -q -b "orchestra/$task" "$wt" HEAD
+    fi
+    [ -d "$wt" ] || die "worktree command did not create $wt"
+  fi
+  local gitdir; gitdir=$(git -C "$wt" rev-parse --path-format=absolute --git-dir)
+
+  # The spec is resolved in the worktree if relative, so the worker reads the same file the prompt names.
+  if [ -z "$feedback" ]; then
+    [ -n "$spec" ] || die "--spec <file> is required for a first run"
+    [ -f "$spec" ] || [ -f "$wt/$spec" ] || die "spec not found: $spec"
+    case "$spec" in /*) ;; *) [ -f "$wt/$spec" ] || spec=$(realpath "$spec") ;; esac
+    case "$spec" in "$wt"/*) spec=${spec#"$wt"/} ;; esac
+  fi
+
+  local state="$wt/.orchestra"
+  mkdir -p "$state/sessions" "$state/runs" "$state/home"
+  # The worker sees only the worktree: a spec that lives elsewhere (uncommitted, another repo) is copied in.
+  if [ -z "$feedback" ] && [ ! -f "$wt/$spec" ]; then
+    cp "$spec" "$state/spec.md"; spec=".orchestra/spec.md"
+  fi
+  grep -qxF '.orchestra/' "$common/info/exclude" 2>/dev/null || echo '.orchestra/' >> "$common/info/exclude"
+
+  local devenv=""
+  if [ -n "$ORCHESTRA_DEVENV_CMD" ]; then
+    devenv="$state/devenv.sh"
+    if [ ! -s "$devenv" ] || [ "$(find "$devenv" -mmin +1440 2>/dev/null)" ]; then
+      (cd "$wt" && bash -c "$ORCHESTRA_DEVENV_CMD") > "$devenv" 2>/dev/null || die "ORCHESTRA_DEVENV_CMD failed"
+    fi
+  fi
+
+  local prompt
+  if [ -n "$feedback" ]; then
+    [ -f "$feedback" ] || die "feedback file not found: $feedback"
+    prompt="Review feedback from the orchestrator. Address all of it, re-run the checks, and rewrite .orchestra/report.json.
+
+$(cat "$feedback")"
+  else
+    local tpl="$here/prompts/worker.md"
+    [ -f "$repo/.orchestra/worker.md" ] && tpl="$repo/.orchestra/worker.md"
+    prompt=$(TASK="$task" SPEC="$spec" CHECKS="$ORCHESTRA_CHECKS" python3 -I -c '
+import os,sys
+t=open(sys.argv[1]).read()
+for k in ("TASK","SPEC","CHECKS"): t=t.replace("{{"+k+"}}", os.environ[k])
+print(t)' "$tpl")
+  fi
+
+  shopt -s nullglob; local runs=("$state"/runs/run-*.jsonl); shopt -u nullglob
+  local n=$(( ${#runs[@]} + 1 )) out="$state/runs/run-$(( ${#runs[@]} + 1 ))"
+  rm -f "$state/report.json"
+
+  local -a hargv; harness_argv hargv "$task" "$state" "$prompt"
+  local -a sandbox; build_sandbox sandbox "$wt" "$gitdir" "$common" "$state" "$devenv"
+
+  if [ "$dry" = 1 ]; then
+    log "dry run: task $task, run $n, harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, worktree $wt"
+    printf '%q ' "${sandbox[@]}" "${hargv[@]:0:${#hargv[@]}-1}" "<prompt: ${#prompt} chars>"; echo
+    return 0
+  fi
+
+  local key=""
+  if [ -n "$ORCHESTRA_KEY_ENV" ]; then
+    if [ -n "$ORCHESTRA_KEY_CMD" ]; then key=$(bash -c "$ORCHESTRA_KEY_CMD") || die "ORCHESTRA_KEY_CMD failed"
+    else key=${!ORCHESTRA_KEY_ENV:-}; fi
+    [ -n "$key" ] || die "no API key: set ORCHESTRA_KEY_CMD or export $ORCHESTRA_KEY_ENV"
+  fi
+
+  log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT"
+  local rc=0
+  # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
+  set +e
+  timeout --kill-after=30s "$ORCHESTRA_TIMEOUT" "${sandbox[@]}" "${hargv[@]}" \
+    9< <(printf '%s' "$key") < /dev/null > "$out.jsonl" 2> "$out.err"   # stdin closed: headless harnesses (pi -p)
+                                                                         # read piped stdin and would wait forever
+  rc=$?
+  set -e
+  unset key
+
+  local used; used=$(harness_models_used "$out.jsonl")
+  local m bad=""
+  for m in $used; do model_allowed "$m" || bad="$bad $m"; done
+  harness_usage "$out.jsonl" > "$out.usage.json" || echo '{}' > "$out.usage.json"
+
+  if [ -n "$bad" ]; then log "MODEL POLICY: model(s) not allowed answered:$bad"; rc=3
+  elif ! check_report "$state/report.json" "$task"; then [ "$rc" = 0 ] && rc=4
+  fi
+  print_summary "$task" "$state" "$n" "$rc"
+  git -C "$wt" status --short | grep -v '^?? \.orchestra/' | head -40 >&2 || true
+  return "$rc"
+}
+
+model_allowed() {
+  local m=$1 a
+  IFS=', ' read -r -a allowed <<< "$ORCHESTRA_ALLOWED_MODELS"
+  for a in "${allowed[@]}"; do [ "$a" = "$m" ] && return 0; done
+  return 1
+}
+
+# Sandbox (Linux, bubblewrap): the worker sees its worktree read-write, the repo's git objects read-only, system
+# directories read-only and a scratch home. Nothing else from your home: no keys, no cloud config, no ssh.
+build_sandbox() {
+  local -n _sb=$1; local wt=$2 gitdir=$3 common=$4 state=$5 devenv=$6
+  case "$ORCHESTRA_SANDBOX" in
+    none)
+      [ "${ORCHESTRA_ALLOW_UNSANDBOXED:-}" = 1 ] || die "ORCHESTRA_SANDBOX=none needs ORCHESTRA_ALLOW_UNSANDBOXED=1"
+      _sb=(env -C "$wt" HOME="$state/home" bash -c "$INNER" "$ORCHESTRA_KEY_ENV" "${devenv:-}")
+      return ;;
+    bwrap) command -v bwrap >/dev/null || die "bubblewrap (bwrap) not found; install it or see docs/security.md" ;;
+    *) die "unknown ORCHESTRA_SANDBOX '$ORCHESTRA_SANDBOX' (bwrap, none)" ;;
+  esac
+  local home=/home/worker
+  _sb=(bwrap --die-with-parent --new-session --unshare-all --share-net
+       --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run)
+  local p
+  for p in /usr /bin /sbin /lib /lib64 /lib32 /etc /nix /opt /run/current-system; do
+    [ -e "$p" ] && _sb+=(--ro-bind "$p" "$p")
+  done
+  _sb+=(--bind "$state/home" "$home" --bind "$wt" "$wt" --ro-bind "$common" "$common" --bind "$gitdir" "$gitdir")
+  local pair src dst
+  for pair in $ORCHESTRA_RO_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
+    mkdir -p "$src"; _sb+=(--ro-bind "$src" "$dst"); done
+  for pair in $ORCHESTRA_RW_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
+    mkdir -p "$src"; _sb+=(--bind "$src" "$dst"); done
+  _sb+=(--clearenv --setenv HOME "$home" --setenv USER worker --setenv LANG C.UTF-8 --setenv TERM dumb
+        --setenv PATH "$(sandbox_path)"
+        --chdir "$wt" /usr/bin/env bash -c "$INNER" "$ORCHESTRA_KEY_ENV" "${devenv:-}")
+}
+
+# The worker's PATH: your PATH with symlinks resolved, keeping only directories mounted in the sandbox (so the same
+# python3, git, node, … you use are there), plus the usual system directories.
+sandbox_path() {
+  local out="" d r
+  local IFS=:
+  for d in $PATH /usr/local/bin /usr/bin /bin; do
+    r=$(readlink -f "$d" 2>/dev/null) || continue
+    [ -d "$r" ] || continue
+    case "$r" in /usr/*|/bin|/bin/*|/sbin/*|/nix/*|/opt/*|/run/current-system/*|/etc/*) ;; *) continue ;; esac
+    case ":$out:" in *":$r:"*) ;; *) out=${out:+$out:}$r ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# Runs first inside the sandbox: take the key from fd 9 into the named variable, close fd 9 so the harness never
+# inherits it, source the dev environment if there is one, then become the harness. $0 = key variable, $1 = devenv.
+INNER='k=$(cat <&9 2>/dev/null); exec 9<&-
+if [ -n "$0" ] && [ -n "$k" ]; then export "$0=$k"; fi; unset k
+if [ -n "$1" ]; then . "$1" >/dev/null 2>&1; fi
+shift; exec "$@"'
+
+
+check_report() {
+  local f=$1 task=$2
+  [ -s "$f" ] || { log "no report written ($f)"; return 1; }
+  python3 -I - "$f" "$task" <<'PY' || return 1
+import json, sys
+try:
+    r = json.load(open(sys.argv[1]))
+except Exception as e:
+    sys.exit(f"orchestra-worker: report is not valid JSON: {e}")
+need = {"task": str, "status": str, "summary": str, "files_changed": list, "checks": list, "open_questions": list}
+bad = [k for k, t in need.items() if not isinstance(r.get(k), t)]
+if bad: sys.exit(f"orchestra-worker: report missing or wrong type: {', '.join(bad)}")
+if r["status"] not in ("done", "partial", "blocked"): sys.exit("orchestra-worker: report status must be done, partial or blocked")
+if r["task"] != sys.argv[2]: sys.exit(f"orchestra-worker: report is for task {r['task']}, not {sys.argv[2]}")
+PY
+}
+
+print_summary() {
+  local task=$1 state=$2 n=$3 rc=$4
+  python3 -I - "$state" "$n" "$rc" <<'PY' >&2
+import json, os, sys, glob
+state, n, rc = sys.argv[1], sys.argv[2], sys.argv[3]
+def load(p):
+    try: return json.load(open(p))
+    except Exception: return {}
+run = load(f"{state}/runs/run-{n}.usage.json")
+total = {"cost": 0.0, "input": 0, "output": 0, "responses": 0}
+for p in glob.glob(f"{state}/runs/run-*.usage.json"):
+    u = load(p)
+    for k in total: total[k] += u.get(k, 0) or 0
+rep = load(f"{state}/report.json")
+print(f"orchestra-worker: run {n} exit {rc} | this run: {run.get('responses',0)} responses, ${run.get('cost',0):.4f} | task total: ${total['cost']:.4f}")
+if rep:
+    print(f"  status: {rep.get('status')}\n  summary: {rep.get('summary')}")
+    for q in rep.get("open_questions", []): print(f"  open: {q}")
+PY
+}
+
+cmd_summary() {
+  local here=$1; shift
+  local task=${1:-} wt=""; shift || true
+  [ "${1:-}" = --worktree ] && wt=${2:-}
+  [ -n "$task" ] || die "usage: orchestra-worker summary <task-id> [--worktree <dir>]"
+  local repo; repo=$(git rev-parse --show-toplevel)
+  [ -n "$wt" ] || wt="$(dirname "$repo")/$(basename "$repo")-worktrees/$task"
+  shopt -s nullglob; local runs=("$wt"/.orchestra/runs/run-*.jsonl); shopt -u nullglob
+  [ ${#runs[@]} -gt 0 ] || die "no runs for $task in $wt"
+  print_summary "$task" "$wt/.orchestra" "${#runs[@]}" "-"
+}
+
+main "$@"

@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"demo"}
+{"type":"message_end","message":{"role":"user","content":"x"}}
+{"type":"message_end","message":{"role":"assistant","provider":"deepseek","model":"deepseek-flash","usage":{"input":100,"output":40,"cacheRead":0,"reasoning":0,"cost":{"total":0.001}}}}
+{"type":"message_update","message":{"role":"assistant","provider":"other","model":"should-not-count"}}
+{"type":"message_end","message":{"role":"assistant","provider":"deepseek","model":"deepseek-flash","usage":{"input":200,"output":60,"cacheRead":10,"reasoning":5,"cost":{"total":0.002}}}}
+not json at all
