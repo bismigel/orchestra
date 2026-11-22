@@ -1,6 +1,6 @@
 # Proposal 0001: `plan` and `refine`
 
-Status: **proposal** · discuss on the pull request · 2026-11-22
+Status: **implemented in 0.2.0** (2026-11-22)
 
 ## Why
 Worker output is only as good as the spec it gets. In the first production run (one SaaS, six tasks, about $0.50 of

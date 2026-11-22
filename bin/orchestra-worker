@@ -36,6 +36,7 @@ load_config() {
   done
   for v in "${!env_set[@]}"; do printf -v "$v" '%s' "${env_set[$v]}"; done
   ORCHESTRA_HARNESS=${ORCHESTRA_HARNESS:-pi}
+  ORCHESTRA_PROFILE=${ORCHESTRA_PROFILE:-dev}   # dev | ops (prompts/worker-<profile>.md, lint rules)
   ORCHESTRA_MODEL=${ORCHESTRA_MODEL:-}
   ORCHESTRA_ALLOWED_MODELS=${ORCHESTRA_ALLOWED_MODELS:-$ORCHESTRA_MODEL}
   ORCHESTRA_THINKING=${ORCHESTRA_THINKING:-low}
@@ -134,7 +135,9 @@ cmd_run() {
 $(cat "$feedback")"
   else
     local tpl="$here/prompts/worker.md"
-    [ -f "$repo/.orchestra/worker.md" ] && tpl="$repo/.orchestra/worker.md"
+    [ -f "$here/prompts/worker-$ORCHESTRA_PROFILE.md" ] && tpl="$here/prompts/worker-$ORCHESTRA_PROFILE.md"
+    [ -f "$repo/.orchestra/worker.md" ] && tpl="$repo/.orchestra/worker.md"   # a repository's own prompt wins
+    PROMPT_TEMPLATE=$tpl
     prompt=$(TASK="$task" SPEC="$spec" CHECKS="$ORCHESTRA_CHECKS" python3 -I -c '
 import os,sys
 t=open(sys.argv[1]).read()
@@ -151,7 +154,7 @@ print(t)' "$tpl")
 
   if [ "$dry" = 1 ]; then
     DRY_RUN=1
-    log "dry run: task $task, run $n, harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, worktree $wt"
+    log "dry run: task $task, run $n, harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, profile $ORCHESTRA_PROFILE, prompt ${PROMPT_TEMPLATE:-feedback}, worktree $wt"
     printf '%q ' "${sandbox[@]}" "${hargv[@]:0:${#hargv[@]}-1}" "<prompt: ${#prompt} chars>"; echo
     return 0
   fi
@@ -163,7 +166,7 @@ print(t)' "$tpl")
     [ -n "$key" ] || die "no API key: set ORCHESTRA_KEY_CMD or export $ORCHESTRA_KEY_ENV"
   fi
 
-  log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT"
+  log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, profile $ORCHESTRA_PROFILE, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT"
   local rc=0
   # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
   set +e

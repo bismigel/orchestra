@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (2026-11-22)
+- **Planning**: `orchestra-plan` and `orchestra-refine` skills, `docs/planning-guide.md`, templates (brief, scope,
+  decisions, architecture, task, wireframe, lessons). Proposal 0001.
+- **`orchestra-task lint`**: the mechanical half of the definition of ready (front matter, ownership overlaps unless
+  chained, paths on the base branch with shorthand resolution, runnable acceptance, dependencies, out of scope).
+- **Ops profile** (`ORCHESTRA_PROFILE=ops`): `prompts/worker-ops.md`, `risk`/`rollback` task fields, `docs/ops-guide.md`
+  and eight `ops-*` skills. Proposal 0002.
+- `install.sh` links every skill and `orchestra-task`. Offline suite: 63 checks.
+
 ## 0.1.1 (2026-11-22)
 - `--dry-run` has no side effects: it no longer runs `ORCHESTRA_WORKTREE_CMD` or creates state for a new task; it
   prints the sandbox plan with the paths it would use.

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# orchestra-task: work with task files.
+#   orchestra-task lint [task-id...] [--tasks-dir DIR] [--base REF] [--profile dev|ops] [--json]
+# See docs/planning-guide.md for the definition of ready; lint covers its mechanical half.
+set -euo pipefail
+main() {
+  local here; here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+  local cmd=${1:-}; shift || true
+  # Repository settings (tasks dir, profile) come from the same config files as orchestra-worker.
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  # shellcheck disable=SC1090,SC1091
+  { [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/orchestra/config.env" ] && . "${XDG_CONFIG_HOME:-$HOME/.config}/orchestra/config.env"; } || true
+  # shellcheck disable=SC1090,SC1091
+  { [ -n "$repo" ] && [ -f "$repo/.orchestra/config.env" ] && . "$repo/.orchestra/config.env"; } || true
+  export ORCHESTRA_TASKS_DIR="${ORCHESTRA_TASKS_DIR:-docs/work/tasks}" ORCHESTRA_PROFILE="${ORCHESTRA_PROFILE:-dev}"
+  case "$cmd" in
+    lint) exec python3 -I "$here/lib/task_lint.py" "$@" ;;
+    -h|--help|help|"") sed -n '2,4p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+    *) echo "orchestra-task: unknown command $cmd (try: lint)" >&2; exit 2 ;;
+  esac
+}
+main "$@"
