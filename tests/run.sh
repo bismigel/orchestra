@@ -76,6 +76,32 @@ main() {
   done
   if [ "${modes%% *}" = none ]; then echo "skip bwrap run tests: bubblewrap cannot create namespaces here"; fi
 
+  # Profiles: the ops profile picks the ops worker prompt; dev keeps the default one.
+  expect_rc 0 "ops profile dry run" env FAKE_MODEL=fake/worker-1 ORCHESTRA_PROFILE=ops "$W" run prof1 --spec spec.md --dry-run
+  ( cd "$repo" && git worktree add -q -b orchestra/prof2 "$(dirname "$repo")/demo-worktrees/prof2" HEAD )
+  expect_rc 0 "ops profile dry run on an existing worktree" env FAKE_MODEL=fake/worker-1 ORCHESTRA_PROFILE=ops "$W" run prof2 --spec spec.md --dry-run
+  has "ops profile selects the ops worker prompt" "prompts/worker-ops.md"
+  expect_rc 0 "dev profile dry run" env FAKE_MODEL=fake/worker-1 "$W" run prof2 --spec spec.md --dry-run
+  has "dev profile keeps the default prompt" "prompts/worker.md"
+
+  # orchestra-task lint on a fixture board: every rule must fire on the bad task and none on the good ones.
+  local lrepo="$tmp/lintrepo"; mkdir -p "$lrepo/src" "$lrepo/docs/work/tasks"; git init -q -b main "$lrepo"
+  echo x > "$lrepo/src/greet.py"; echo x > "$lrepo/README.md"; cp "$root"/tests/fixtures/board/*.md "$lrepo/docs/work/tasks/"
+  git -C "$lrepo" add -A; git -C "$lrepo" -c user.email=t@t -c user.name=t commit -q -m init
+  ( cd "$lrepo" && "$root/bin/orchestra-task" lint --base HEAD A1 A2 A3 A4 ) > "$tmp/out" 2>&1 && bad "lint passes a broken board" || ok "lint fails a broken board"
+  has "lint: good task passes" "ok   A1"
+  has "lint: chained task may share ownership" "ok   A3"
+  has "lint: an unchained overlap fails both tasks" "FAIL A4"
+  for rule in "L1 front matter missing" "L1 delegation must be" "L1 status must be" "L5 Owns" "L6 owns path \`nowhere" \
+              "L6 touches path \`docs/missing.md\`" "L8 acceptance has no command" "L8 visual check not marked" \
+              "L10 depends on unknown task A9" "L11 no 'Out of scope'"; do
+    has "lint rule fires: $rule" "$rule"
+  done
+  hasnt "lint: marked new file is accepted" "new_module.py"
+  ( cd "$lrepo" && "$root/bin/orchestra-task" lint --base HEAD --profile ops O1 ) > "$tmp/out" 2>&1 || true
+  has "lint (ops): risk and rollback required" "L1 front matter missing: risk, rollback"
+  ( cd "$lrepo" && "$root/bin/orchestra-task" lint --base HEAD O1 ) > "$tmp/out" 2>&1 && ok "lint (dev): no risk/rollback needed" || bad "lint (dev) wrongly needs risk/rollback"
+
   echo "---"; echo "$pass passed, $fail failed"
   [ "$fail" = 0 ]
 }

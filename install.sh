@@ -7,14 +7,20 @@ main() {
   local here; here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
   local bin="$HOME/.local/bin" cfg="${XDG_CONFIG_HOME:-$HOME/.config}/orchestra" skills="$HOME/.claude/skills"
   if [ "${1:-}" = --uninstall ]; then
-    rm -f "$bin/orchestra-worker"
-    [ -L "$skills/orchestra" ] && rm -f "$skills/orchestra"
+    rm -f "$bin/orchestra-worker" "$bin/orchestra-task"
+    local l; for l in "$skills"/*; do
+      [ -L "$l" ] && case "$(readlink "$l")" in "$here"/skills/*) rm -f "$l" ;; esac
+    done
     echo "removed the CLI and skill links; your config in $cfg is kept"
     return
   fi
   mkdir -p "$bin" "$cfg" "$skills"
   ln -sfn "$here/bin/orchestra-worker" "$bin/orchestra-worker"
-  ln -sfn "$here/skills/claude-code/orchestra" "$skills/orchestra"
+  ln -sfn "$here/bin/orchestra-task" "$bin/orchestra-task"
+  local d names=""
+  for d in "$here"/skills/claude-code/*/; do
+    ln -sfn "${d%/}" "$skills/$(basename "$d")"; names="$names $(basename "$d")"
+  done
   if [ ! -f "$cfg/config.env" ]; then
     cp "$here/config/config.example.env" "$cfg/config.env"
     echo "wrote $cfg/config.env: set ORCHESTRA_MODEL, ORCHESTRA_KEY_ENV and ORCHESTRA_KEY_CMD"
@@ -28,7 +34,8 @@ main() {
   cat <<EOF
 installed:
   $bin/orchestra-worker -> $here/bin/orchestra-worker
-  $skills/orchestra     -> $here/skills/claude-code/orchestra   (Claude Code skill: /orchestra)
+  $bin/orchestra-task   -> $here/bin/orchestra-task
+  Claude Code skills in $skills:$names
 To make every Claude Code session use it, add to ~/.claude/CLAUDE.md:
   - Delegate mechanical coding work with the orchestra skill: I decide (design, rules, risky test cases) and review;
     workers (orchestra-worker) only implement settled specs. Never delegate judgment calls.

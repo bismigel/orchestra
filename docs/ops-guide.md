@@ -1,0 +1,72 @@
+# Ops guide: running infrastructure with orchestra
+
+For the orchestrating agent on an infrastructure repository (`ORCHESTRA_PROFILE=ops`). Why: [proposals/0002](proposals/0002-ops-profile.md).
+Assumes GitOps: desired state in Git, applied by a controller (Argo CD, Flux) or by a human (`tofu apply`). Nothing
+in orchestra applies changes.
+
+## Who does what
+| Class | Work |
+|---|---|
+| `worker` | runbooks and docs from an outline; a new app from the template checklist; alert rules plus tests; dashboards; dependency bumps with changelog notes; validator fixes |
+| `split` | manifests, Helm/Kustomize, backup config, secrets wired **by name**: you decide sizes, allow-lists, ports, versions; the worker writes them |
+| `orchestrator` | network and datapath, storage and anything stateful, DNS and the edge, identity and access, secret values, incidents, anything that deletes |
+
+Workers never get cluster, cloud, forge or secret-store credentials. Live reads (`kubectl get`, a `tofu plan` against
+real state, metrics) are yours.
+
+## Task fields (lint enforces them in this profile)
+`risk: low | medium | high` (high = datapath, storage, edge, auth, deletes) and `rollback:` (one line: how to undo).
+
+## The change loop: `ops-change`
+1. **Ticket**: what and why, risk class, rollback.
+2. **Preflight** (`ops-preflight`): blast radius, dependants, current state **measured** with a command (cite it).
+   High risk: rehearse in staging, or the PR says why it can't be.
+3. **Draft**: the worker writes the diff and runs validators in its sandbox.
+4. **Review** (`ops-review`): read the **rendered** difference (`kustomize build`/`helm template` of base vs branch,
+   diffed), not only the source diff; check the repository's invariants line by line; a guard or probe must be shown
+   to fail when it should ("a check that cannot fail is worthless").
+5. **PR**: CI runs the same validators. A human merges high-risk changes.
+6. **Watch**: after apply, controller sync and health, alerts, probes and logs for a fixed window. A failed check
+   means roll back, not debug forward.
+7. **Record**: current-state docs; a decision record if something was decided; a lessons line if anything surprised.
+
+## Playbooks
+**`ops-preflight`**: What changes, for whom? What depends on it (search the repository and the live system)? What is
+the current state (measure, quote the command)? What is the rollback, and has it been tried? Can it be rehearsed?
+Which alert or probe will tell us it broke, and does it fire today if the thing is down?
+
+**`ops-review`**: Rendered diff of every overlay touched; no `:latest` or bare tags, digests copied not typed;
+requests and limits; probes (liveness never checks dependencies); network policy matches the decided allow-list
+exactly; secrets referenced by name; nothing stateful deleted or recreated; the worker's `risk_notes` answered.
+
+**`ops-incident`**: Stabilise first (roll back the last change if it correlates). Gather evidence before theories:
+events, logs, metrics, recent changes. One hypothesis at a time, each verified with a command before it is stated.
+Mitigate, then fix through Git. Write it up: timeline, cause, the guard that would have caught it.
+
+**`ops-new-app`**: namespace and admission level, default-deny network policy plus explicit egress, secrets through
+the secrets operator, requests and limits, readiness and liveness, pinned digests, the controller application, backups
+(or an explicit "no backups" with the reason), monitoring and alerts, the edge route. The repository's own template
+checklist wins over this list.
+
+**`ops-upgrade`**: Read the changelog between versions for breaking changes and migrations; bump in staging first;
+watch window; then production; note the version and anything learned.
+
+**`ops-secret-rotation`**: Inventory every consumer of the secret first (search config, the secret store, the
+cluster, hosts). Mint the new credential, propagate to every consumer, verify each one actually uses it (a real call,
+an archive, a login), and only then revoke the old one. Values never enter the model's context: move them with
+helpers that don't print, compare by fingerprint.
+
+**`ops-backup-drill`**: Restore the latest backup into a scratch target, check row counts or files against the source,
+time it, and record the result. An untested backup is a hope.
+
+## Integrations (least privilege)
+| Area | Use | Access |
+|---|---|---|
+| Kubernetes | MCP server or `kubectl` with allow-listed read verbs | read-only account |
+| GitOps controller | status, diff | read; changes through Git |
+| Metrics and alerts | Prometheus-compatible API, Alertmanager, Grafana | read |
+| Logs | Loki or equivalent | read |
+| Forge | PRs, issues, CI status | PRs and comments only |
+| Edge and DNS | provider API or MCP | read; changes through IaC PRs |
+| Secrets | helpers that don't print, never an MCP | never in context |
+| Docs | fetch upstream changelogs and references | read |

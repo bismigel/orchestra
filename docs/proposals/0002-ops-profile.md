@@ -1,6 +1,6 @@
 # Proposal 0002: an `ops` profile for running infrastructure
 
-Status: **proposal** · discuss on the pull request · 2026-11-22
+Status: **implemented in 0.2.0** (2026-11-22)
 
 ## Why a separate profile
 Software tasks change code that is reviewed and then shipped. Operations tasks change **live systems**: a cluster, a

@@ -59,6 +59,24 @@ orchestra-worker run hello --spec /path/to/orchestra/examples/hello/spec.md
 orchestra-worker summary hello
 ```
 
+## Planning and refinement
+Workers do better work from better specs, so orchestra also helps you write them:
+- **`plan`** (skill `orchestra-plan`): a planning session for a new project: brief, numbered decisions, scope and
+  MVP line, architecture, HTML wireframes, and a board of worker-ready tasks. Checkpoints you approve; the planning
+  pack in the repository is the state. See [docs/planning-guide.md](docs/planning-guide.md) and
+  [templates/](templates/).
+- **`refine`** (skill `orchestra-refine`): brings tasks up to the definition of ready. Its mechanical half is a CLI:
+  ```sh
+  orchestra-task lint            # every open task in docs/work/tasks (front matter, ownership overlaps, paths,
+                                 # runnable acceptance, dependencies, out of scope)
+  ```
+
+## Ops profile (infrastructure)
+`ORCHESTRA_PROFILE=ops` in a repository's `.orchestra/config.env` is for GitOps infrastructure work: workers get a
+stricter prompt (no credentials, validators, rendered-diff report), tasks need `risk` and `rollback`, and eight
+skills cover the change loop, preflight, review, incidents, new apps, upgrades, secret rotation and backup drills.
+See [docs/ops-guide.md](docs/ops-guide.md).
+
 ## How you use it
 1. **Classify** the task: `worker` (spec settles everything), `split` (you write the risky rules and test rows
    first), or `orchestrator` (do it yourself). Never delegate judgment calls.
@@ -80,7 +98,7 @@ Other orchestrators: reference `docs/orchestrator-guide.md` from their `AGENTS.m
 
 ## Status
 Early and evolving: the interface (`run`, `summary`, the report schema, the config keys) is meant to stay stable
-while the inside improves. Planned: an egress-allowlisting proxy for the sandbox, more harness adapters, macOS
+while the inside improves. Planned: an egress-allowlisting proxy (issue #2) for the sandbox, more harness adapters, macOS
 sandboxing, and an optional long-running worker service for unattended queues. Ideas and adapters are welcome.
 
 ## Contributing

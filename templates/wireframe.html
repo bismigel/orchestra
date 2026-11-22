@@ -1,0 +1,42 @@
+<!doctype html>
+<!-- Wireframe template for `plan` → Design. One file per screen (or a few screens per file). Self-contained: no
+     external assets. Each element that matters gets a numbered pin; the notes map each pin to a story and to any
+     rule that governs it. Light and dark themes follow the system; check at 400 px too. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wireframe: SCREEN NAME</title>
+<style>
+  :root { --ground:#f5f6f4; --surface:#fff; --ink:#111816; --muted:#59625f; --line:#dce0dd; --accent:#0e6b57; --mark:#ffe58a; }
+  @media (prefers-color-scheme: dark) { :root { --ground:#0e1412; --surface:#151d1a; --ink:#e8edea; --muted:#9aa6a1; --line:#26322e; --accent:#3fb393; --mark:#f2d46b; } }
+  body { margin:0; background:var(--ground); color:var(--ink); font:15px/1.5 system-ui, sans-serif; padding:24px; }
+  .screen { display:grid; grid-template-columns: minmax(0,1fr) 320px; gap:24px; max-width:1200px; margin:0 auto 48px; }
+  @media (max-width: 900px) { .screen { grid-template-columns: 1fr; } }
+  .frame { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px; position:relative; }
+  .head { display:flex; gap:12px; align-items:baseline; margin-bottom:12px; }
+  .route { font-family:ui-monospace, monospace; color:var(--muted); }
+  .box { border:1px dashed var(--line); border-radius:8px; padding:10px; margin:8px 0; position:relative; }
+  .btn { display:inline-block; border:1px solid var(--line); border-radius:8px; padding:6px 12px; }
+  .btn.primary { background:var(--accent); color:var(--surface); border-color:var(--accent); }
+  .pin { position:absolute; top:-10px; right:-10px; background:var(--mark); color:#111; border-radius:999px;
+         width:22px; height:22px; display:grid; place-items:center; font:700 12px system-ui; }
+  .notes ol { padding-left:20px; } .notes li { margin-bottom:10px; } .ref { color:var(--muted); font-size:12px; display:block; }
+</style>
+</head>
+<body>
+<section class="screen" id="screen-1">
+  <div class="frame">
+    <div class="head"><h2>S1 · Screen name</h2><span class="route">/route</span></div>
+    <div class="box">Header / navigation <span class="pin">1</span></div>
+    <div class="box">Main content: what the user sees first <span class="pin">2</span></div>
+    <div class="box"><span class="btn primary">Primary action</span> <span class="btn">Secondary</span> <span class="pin">3</span></div>
+  </div>
+  <aside class="notes"><b>Notes</b><ol>
+    <li>What this element is for. <span class="ref">Story S1.1 · rule: …</span></li>
+    <li>What data it shows, from where, and the empty / error state. <span class="ref">Story S1.2</span></li>
+    <li>What happens on click, including failure. <span class="ref">Story S1.3 · decision D?</span></li>
+  </ol></aside>
+</section>
+</body>
+</html>
