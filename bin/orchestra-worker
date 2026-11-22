@@ -80,6 +80,17 @@ cmd_run() {
   local common; common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
   [ -n "$wt" ] || wt="$(dirname "$repo")/$(basename "$repo")-worktrees/$task"
   wt=$(realpath -m "$wt")
+  if [ ! -d "$wt" ] && [ "$dry" = 1 ]; then
+    # A dry run changes nothing: report what would happen and stop before any worktree, claim or state is created.
+    log "dry run: would create the worktree $wt (${ORCHESTRA_WORKTREE_CMD:-git worktree add -b orchestra/$task})"
+    log "dry run: task $task, harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL; nothing was changed"
+    DRY_RUN=1
+    local -a hargv sandbox
+    harness_argv hargv "$task" "$wt/.orchestra" "<prompt>"
+    build_sandbox sandbox "$wt" "$common/worktrees/$task" "$common" "$wt/.orchestra" ""
+    printf '%q ' "${sandbox[@]}" "${hargv[@]}"; echo
+    return 0
+  fi
   if [ ! -d "$wt" ]; then
     [ -z "$feedback" ] || die "$wt does not exist: nothing to give feedback to"
     if [ -n "$ORCHESTRA_WORKTREE_CMD" ]; then
@@ -139,6 +150,7 @@ print(t)' "$tpl")
   local -a sandbox; build_sandbox sandbox "$wt" "$gitdir" "$common" "$state" "$devenv"
 
   if [ "$dry" = 1 ]; then
+    DRY_RUN=1
     log "dry run: task $task, run $n, harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, worktree $wt"
     printf '%q ' "${sandbox[@]}" "${hargv[@]:0:${#hargv[@]}-1}" "<prompt: ${#prompt} chars>"; echo
     return 0
@@ -204,9 +216,9 @@ build_sandbox() {
   _sb+=(--bind "$state/home" "$home" --bind "$wt" "$wt" --ro-bind "$common" "$common" --bind "$gitdir" "$gitdir")
   local pair src dst
   for pair in $ORCHESTRA_RO_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
-    mkdir -p "$src"; _sb+=(--ro-bind "$src" "$dst"); done
+    [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--ro-bind "$src" "$dst"); done
   for pair in $ORCHESTRA_RW_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
-    mkdir -p "$src"; _sb+=(--bind "$src" "$dst"); done
+    [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--bind "$src" "$dst"); done
   _sb+=(--clearenv --setenv HOME "$home" --setenv USER worker --setenv LANG C.UTF-8 --setenv TERM dumb
         --setenv PATH "$(sandbox_path)"
         --chdir "$wt" /usr/bin/env bash -c "$INNER" "$ORCHESTRA_KEY_ENV" "${devenv:-}")

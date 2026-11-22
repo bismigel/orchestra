@@ -42,6 +42,8 @@ main() {
     expect_rc 0 "dry run (bwrap)" env FAKE_MODEL=fake/worker-1 "$W" run t1 --spec spec.md --dry-run
     has "dry run builds a bwrap sandbox" "bwrap"
     hasnt "dry run does not contain the key" "$FAKE_SECRET"
+    expect_rc 0 "dry run with a worktree command" env FAKE_MODEL=fake/worker-1 ORCHESTRA_WORKTREE_CMD='touch "$PWD/CLAIMED"; git worktree add -q -b x/{task} ../demo-worktrees/{task} HEAD' "$W" run dry1 --spec spec.md --dry-run
+    if [ ! -e "$repo/CLAIMED" ] && [ ! -d "$(dirname "$repo")/demo-worktrees/dry1" ]; then ok "dry run has no side effects"; else bad "dry run ran the worktree command"; fi
   else
     echo "skip bwrap tests: bubblewrap not installed"
   fi

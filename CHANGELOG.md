@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 (2026-11-22)
+- `--dry-run` has no side effects: it no longer runs `ORCHESTRA_WORKTREE_CMD` or creates state for a new task; it
+  prints the sandbox plan with the paths it would use.
+- Offline suite: 41 checks.
+
 ## 0.1.0 (2026-11-22)
 First public version, extracted from a production pilot.
 - `orchestra-worker run|summary`; exit codes 0/2/3/4/124.
