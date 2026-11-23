@@ -155,6 +155,26 @@ main() {
   has "the written subject is kept" "P2: keep my words"
   has "the written body is kept" "Body line."
   hasnt "no squash placeholder in the message" "squash P2"
+  # land --pr: for a protected base. The proven commit goes to orchestra/<task>, a PR command runs, the base is untouched.
+  ( cd "$LR" && git fetch -q origin && git worktree add -q -b task/P3 ../repo-worktrees/P3 origin/main && cd ../repo-worktrees/P3 &&
+    echo three > three.txt && git add -A && git commit -qm "P3: via a pull request" ) >/dev/null 2>&1
+  local main_before; main_before=$(git -C "$tmp/landing/remote.git" rev-parse main)
+  expect_rc 0 "land --pr" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_CMD='echo "https://forge.example/pr/7 head={branch} base={base} title={title}"' "$W" land P3 --pr
+  has "land --pr reports the pull request" "pull request: https://forge.example/pr/7 head=orchestra/P3 base=main title=P3: via a pull request"
+  if [ "$(git -C "$tmp/landing/remote.git" rev-parse main)" = "$main_before" ]; then ok "land --pr leaves the base alone"; else bad "land --pr pushed to the base"; fi
+  git -C "$tmp/landing/remote.git" log -1 --format=%B orchestra/P3 > "$tmp/out" 2>&1
+  has "the PR branch carries the Proof trailer" "Proof: pass"
+  echo more > "$tmp/landing/repo-worktrees/P3/three.txt"
+  expect_rc 0 "land --pr again updates the PR branch" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_CMD='true' "$W" land P3 --pr
+  if git -C "$tmp/landing/remote.git" show orchestra/P3:three.txt | grep -q more; then ok "the PR branch has the new commit"; else bad "PR branch not updated"; fi
+  expect_rc 2 "land --pr refuses the base as the PR branch" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_BRANCH=main "$W" land P3 --pr
+  # A title is worker-influenced text: it must reach the PR command as data, never as code.
+  ( cd "$tmp/landing/repo-worktrees/P3" && echo evil > evil.txt && git add -A && git commit -qm 'P3: $(touch PWNED) `touch PWNED2`' ) >/dev/null 2>&1
+  expect_rc 0 "land --pr with a hostile title" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_MESSAGE_KEEP=1 ORCHESTRA_PR_CMD='echo "title={title}"' "$W" land P3 --pr
+  if [ -e "$tmp/landing/repo-worktrees/P3/PWNED" ] || [ -e "$tmp/landing/repo-worktrees/P3/PWNED2" ] || [ -e "$LR/PWNED" ]; then
+    bad "a commit title ran as code in the PR command"; else ok "a hostile title is data, not code"; fi
+  expect_rc 0 "land --pr with ORCHESTRA_PR_CMD=none just pushes" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_CMD=none "$W" land P3 --pr
+  has "without a PR command it says what to do" "open a pull request into main"
   echo "---"; echo "$pass passed, $fail failed"
   [ "$fail" = 0 ]
 }

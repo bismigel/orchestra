@@ -5,7 +5,8 @@
 #   orchestra-worker summary <task-id> [--worktree <dir>]
 #   orchestra-worker diff <task-id> [--worktree <dir>] [--stat]     review diff, generated files only in the stat
 #   orchestra-worker prove <task-id> [--worktree <dir>] [--manual "what you checked"]
-#   orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]
+#   orchestra-worker land <task-id> [--pr] [--worktree <dir>] [--message-file <file>]
+#                                             --pr (or ORCHESTRA_LAND=pr): push a branch and open a pull request
 #   orchestra-worker status [--json] [--prune] [--worktree <dir>]
 #                                             what is running now, and what died silently (--prune clears those)
 #   orchestra-worker watch [<task-id>]        live view of running workers: what each one is doing right now
@@ -50,7 +51,7 @@ main() {
     lessons) cmd_lessons "$here" "$@" ;;
     doctor) cmd_doctor "$here" "$@" ;;
     guide|docs) cmd_guide "$here" "$@" ;;
-    -h|--help|help|"") sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
+    -h|--help|help|"") sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; return 0 ;;
     *) die "unknown command: $cmd (try: run, status, watch, review, scout, prove, land, clean, history, doctor, guide)" ;;
   esac
 }
@@ -1060,10 +1061,44 @@ cmd_prove() {
   prove_all "$wt" "$task"
 }
 
+# land_pr <wt> <task> <base-branch>: for protected bases. Push the proven, squashed commit to its own branch
+# (ORCHESTRA_PR_BRANCH, default orchestra/<task>; force-with-lease, it is the task's own branch, never the base) and
+# open a pull request with ORCHESTRA_PR_CMD ({branch} {base} {title} {body} replaced; default: gh when installed).
+land_pr() {
+  local wt=$1 task=$2 base=$3
+  local prb=${ORCHESTRA_PR_BRANCH:-orchestra/{task}}; prb=${prb//\{task\}/$task}
+  [ "$prb" != "$base" ] || die "ORCHESTRA_PR_BRANCH must not be the base branch"
+  local push=${ORCHESTRA_PR_PUSH_CMD:-git push --force-with-lease origin HEAD:refs/heads/{branch}}
+  (cd "$wt" && bash -c "${push//\{branch\}/$prb}") >/dev/null 2>&1 || die "could not push $prb (ORCHESTRA_PR_PUSH_CMD)"
+  local title body; title=$(git -C "$wt" log -1 --format=%s); body=$(mktemp)
+  git -C "$wt" log -1 --format=%b > "$body"
+  local cmd=${ORCHESTRA_PR_CMD:-}
+  if [ -z "$cmd" ] && command -v gh >/dev/null; then cmd='gh pr create --base "{base}" --head "{branch}" --title "{title}" --body-file "{body}"'; fi
+  if [ -z "$cmd" ] || [ "$cmd" = none ]; then
+    rm -f "$body"
+    echo "proven and pushed to $prb: open a pull request into $base (set ORCHESTRA_PR_CMD to do it automatically)"; return 0
+  fi
+  # Placeholders become variable references, expanded by the shell that runs the command: the title comes from a
+  # commit message, and an expanded value is never parsed again, so "$(...)" in a title cannot run anything.
+  # Quote the placeholders in the template ("{title}") to keep spaces together.
+  cmd=${cmd//\{branch\}/\$\{ORCHESTRA_PR_HEAD\}}; cmd=${cmd//\{base\}/\$\{ORCHESTRA_PR_BASE\}}
+  cmd=${cmd//\{title\}/\$\{ORCHESTRA_PR_TITLE\}}; cmd=${cmd//\{body\}/\$\{ORCHESTRA_PR_BODY\}}
+  local out; if out=$(cd "$wt" && ORCHESTRA_PR_HEAD=$prb ORCHESTRA_PR_BASE=$base ORCHESTRA_PR_TITLE=$title \
+                      ORCHESTRA_PR_BODY=$body bash -c "$cmd" 2>&1); then
+    rm -f "$body"; echo "proven, pushed to $prb, pull request: $(printf '%s' "$out" | tail -1)"; return 0
+  fi
+  rm -f "$body"; die "pushed $prb, but opening the pull request failed: $(printf '%s' "$out" | tail -1)"
+}
+
 cmd_land() {
-  local here=$1; shift; local task="" wt="" msgfile=""
-  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; --message-file) msgfile=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
-  [ -n "$task" ] || die "usage: orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]"
+  local here=$1; shift; local task="" wt="" msgfile="" pr=0
+  [ "${ORCHESTRA_LAND:-push}" = pr ] && pr=1
+  while [ $# -gt 0 ]; do case "$1" in
+    --worktree) wt=${2:?}; shift 2 ;; --message-file) msgfile=${2:?}; shift 2 ;;
+    --pr) pr=1; shift ;; --push) pr=0; shift ;;
+    -*) die "unknown option $1" ;; *) task=$1; shift ;;
+  esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker land <task-id> [--pr] [--worktree <dir>] [--message-file <file>]"
   local repo state; task_setup "$task" "$wt"
   [ -z "$msgfile" ] || [ -f "$msgfile" ] || die "message file not found: $msgfile"
   local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/}
@@ -1109,6 +1144,7 @@ for r in rows:
 print("\n" + "\n".join(lines))
 PY
     git -C "$wt" commit -q --amend -F "$msg"; rm -f "$msg"
+    if [ "$pr" = 1 ]; then land_pr "$wt" "$task" "$branch"; return; fi
     if (cd "$wt" && bash -c "${ORCHESTRA_PUSH_CMD//\{branch\}/$branch}") >/dev/null 2>&1; then
       echo "landed $task: $(git -C "$wt" log -1 --format='%h %s')"; return 0
     fi
