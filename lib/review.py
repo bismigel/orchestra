@@ -281,6 +281,8 @@ def collect(args, state):
         outside = [f["path"] for f in changed
                    if not f["generated"] and not covered(f["path"], paths, args.worktree)]
     data["paths"] = {"checked": paths is not None, "outside": outside}
+    data["spec_gaps"] = len(data["blocking"]) + len(outside) + len(data["outside_scope_needed"]) \
+        + len(data["assumed"])
 
     worker_checks = None
     acceptance = None
@@ -406,11 +408,14 @@ def render_text(data):
         if len(diff["list"]) > 12:
             print(f"  … and {len(diff['list']) - 12} more")
 
+    if data["spec_gaps"]:
+        print(f"{'lessons':<10}{data['spec_gaps']} spec gap(s): orchestra-worker lessons {task}")
+
     print(f"{'next':<10}orchestra-worker diff {task} · prove {task} · land {task}")
 
 
 PUBLIC_KEYS = ("task", "run", "report_valid", "status", "summary", "blocking", "assumed",
-               "outside_scope_needed", "paths", "worker_checks", "acceptance", "proofs", "diff")
+               "outside_scope_needed", "paths", "spec_gaps", "worker_checks", "acceptance", "proofs", "diff")
 
 
 def render_json(data):
