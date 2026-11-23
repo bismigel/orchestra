@@ -77,7 +77,7 @@ export default function (pi) {
   };
 
   const start = (ctx) => {
-    if (timer) return;
+    stop(); // in case a session_start arrives without a shutdown (defensive)
     refresh(ctx);
     timer = setInterval(() => refresh(ctx), POLL_MS);
     timer.unref?.();
@@ -89,7 +89,9 @@ export default function (pi) {
   };
 
   pi.on("session_start", async (_e, ctx) => start(ctx));
-  pi.on("session_shutdown", async () => stop);
+  // Session teardown: clear the timer BEFORE the old ctx goes stale. Holding ctx in the interval across
+  // a reload is exactly the crash this avoids — the docs forbid using a captured ctx after replacement.
+  pi.on("session_shutdown", () => { stop(); });
   // A finished tool call is the moment the picture can change; the interval covers everything else.
   pi.on("tool_execution_end", async (_e, ctx) => {
     if (last.running > 0 || /orchestra|worker/.test(String(_e?.toolName || ""))) refresh(ctx);
