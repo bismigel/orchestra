@@ -14,6 +14,10 @@
 #                                             read-only worker maps a draft spec to the code (where things live)
 #   orchestra-worker clean [--yes] [--include-squashed]
 #                                             remove worktrees of landed tasks (lists them without --yes)
+#   orchestra-worker history [--json]         every task's runs, cost and outcome, including cleaned-up ones
+#   orchestra-worker lessons <task-id>        draft lessons.md lines from a run's spec gaps
+#   orchestra-worker doctor                   check the setup: sandbox, harness, key, model, base, gate
+#   orchestra-worker guide [<name>] [--print] path of a guide: orchestrator, planning, ops, security, proofs, …
 #
 # prove runs the landing gate and the task's `proof:` checks in the worktree (outside the sandbox) and records one
 # line per check, bound to a hash of the exact code. land rebases, squashes, proves that code and pushes, with
@@ -41,8 +45,12 @@ main() {
     review) cmd_review "$here" "$@" ;;
     scout) cmd_scout "$here" "$@" ;;
     clean) cmd_clean "$here" "$@" ;;
-    -h|--help|help|"") sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
-    *) die "unknown command: $cmd (try: run, status, watch, review, scout, prove, land, clean)" ;;
+    history) cmd_history "$here" "$@" ;;
+    lessons) cmd_lessons "$here" "$@" ;;
+    doctor) cmd_doctor "$here" "$@" ;;
+    guide|docs) cmd_guide "$here" "$@" ;;
+    -h|--help|help|"") sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
+    *) die "unknown command: $cmd (try: run, status, watch, review, scout, prove, land, clean, history, doctor, guide)" ;;
   esac
 }
 
@@ -698,13 +706,58 @@ cmd_review() {
     --tree "$(work_tree "$wt")" "${extra[@]}"
 }
 
+# ledger_file <repo>: where cleaned-up tasks are archived (one JSON line each). Inside the git common dir: never
+# committed, shared by every worktree, and it survives `clean`.
+ledger_file() { echo "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)/orchestra/ledger.jsonl"; }
+
+# cmd_history: every task's runs, cost and outcome: live worktrees plus the ledger of cleaned-up ones.
+cmd_history() {
+  local here=$1; shift
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  python3 -I "$here/lib/history.py" --worktrees "$(dirname "$repo")/$(basename "$repo")-worktrees" \
+    --ledger "$(ledger_file "$repo")" "$@"
+}
+
+# cmd_lessons: draft lines for the lessons file from what a run's review shows the spec missed.
+cmd_lessons() {
+  local here=$1; shift; local task="" wt=""
+  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker lessons <task-id> [--worktree <dir>]"
+  local repo state; task_setup "$task" "$wt"
+  python3 -I "$here/lib/review.py" --task "$task" --worktree "$wt" --base "$ORCHESTRA_BASE" \
+    --spec "$(spec_file "$wt" "$task")" --generated "$ORCHESTRA_GENERATED" --checks "$(checks "$wt" "$task")" \
+    --tree "$(work_tree "$wt")" --json | python3 -I "$here/lib/lessons.py" --task "$task"
+}
+
+# cmd_doctor: implemented below by the orchestrator (key handling).
+cmd_doctor() { die "doctor: not implemented yet"; }
+
+# cmd_guide [<name>] [--print]: the absolute path of a guide (or its text), so skills never guess relative paths.
+cmd_guide() {
+  local here=$1; shift; local name="" print=0
+  while [ $# -gt 0 ]; do case "$1" in --print) print=1; shift ;; -*) die "unknown option $1" ;; *) name=$1; shift ;; esac; done
+  local f
+  case "${name:-orchestrator}" in
+    orchestrator|orchestra) f=orchestrator-guide.md ;;
+    planning|plan|refine) f=planning-guide.md ;;
+    ops) f=ops-guide.md ;;
+    security) f=security.md ;;
+    proofs) f=proofs.md ;;
+    design) f=design.md ;;
+    harness) f=adding-a-harness.md ;;
+    templates) echo "$here/templates"; return 0 ;;
+    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, templates)" ;;
+  esac
+  if [ "$print" = 1 ]; then cat "$here/docs/$f"; else echo "$here/docs/$f"; fi
+}
+
 # cmd_clean: remove the worktrees of tasks that have landed (lib/clean.py decides which; it only lists without --yes).
 cmd_clean() {
   local here=$1; shift
   local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
   ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
   python3 -I "$here/lib/clean.py" --repo "$repo" --worktrees "$(dirname "$repo")/$(basename "$repo")-worktrees" \
-    --base "$ORCHESTRA_BASE" "$@"
+    --base "$ORCHESTRA_BASE" --ledger "$(ledger_file "$repo")" "$@"
 }
 
 # cmd_scout: a read-only worker reads a draft spec against the code and reports where things really live, what else
