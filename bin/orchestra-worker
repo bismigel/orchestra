@@ -615,6 +615,7 @@ print(t)' "$here/prompts/scout.md")
   log "scout $task: read-only, model $ORCHESTRA_MODEL, timeout ${ORCHESTRA_SCOUT_TIMEOUT:-15m}"
   local progress; progress=$(progress_script "$harness_file")
   write_run_state "$state" "$task" "$n" "$repo" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress" scout
+  # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
   trap "rm -f $(printf '%q' "$state/run.json")" EXIT
   local rc=0 follower=""
   : > "$out.jsonl"
