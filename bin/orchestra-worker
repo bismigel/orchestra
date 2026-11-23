@@ -133,7 +133,7 @@ cmd_run() {
   if [ -z "$feedback" ] && [ ! -f "$wt/$spec" ]; then
     cp "$spec" "$state/spec.md"; spec=".orchestra/spec.md"
   fi
-  grep -qxF '.orchestra/' "$common/info/exclude" 2>/dev/null || echo '.orchestra/' >> "$common/info/exclude"
+  grep -qxF '.orchestra/*' "$common/info/exclude" 2>/dev/null || printf '%s\n' '.orchestra/*' '!.orchestra/config.env' >> "$common/info/exclude"
 
   local devenv=""
   if [ -n "$ORCHESTRA_DEVENV_CMD" ]; then
@@ -327,7 +327,7 @@ task_setup() {
   wt=$(realpath -m "$wt"); [ -d "$wt" ] || die "no worktree for $task at $wt"
   state="$wt/.orchestra"; mkdir -p "$state/proofs"
   local common; common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)
-  grep -qxF '.orchestra/' "$common/info/exclude" 2>/dev/null || echo '.orchestra/' >> "$common/info/exclude"
+  grep -qxF '.orchestra/*' "$common/info/exclude" 2>/dev/null || printf '%s\n' '.orchestra/*' '!.orchestra/config.env' >> "$common/info/exclude"
 }
 
 # work_tree <wt>: the git tree hash of everything in the worktree (tracked and untracked, not ignored), without
