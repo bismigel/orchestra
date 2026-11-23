@@ -65,7 +65,7 @@ load_config() {
   ORCHESTRA_BASE=${ORCHESTRA_BASE:-origin/main}                 # what tasks are reviewed against and land on
   ORCHESTRA_GATE=${ORCHESTRA_GATE:-}                            # the repository's landing gate, one shell command
   ORCHESTRA_TASKS_DIR=${ORCHESTRA_TASKS_DIR:-docs/work/tasks}
-  ORCHESTRA_PUSH_CMD=${ORCHESTRA_PUSH_CMD:-git push origin HEAD:refs/heads/{branch}}
+  ORCHESTRA_PUSH_CMD=${ORCHESTRA_PUSH_CMD:-"git push origin HEAD:refs/heads/{branch}"}
   ORCHESTRA_GENERATED=${ORCHESTRA_GENERATED:-*_templ.go *.pb.go *_gen.go *.gen.go *.min.js *.min.css go.sum package-lock.json yarn.lock pnpm-lock.yaml Cargo.lock poetry.lock uv.lock}
   [ "${ORCHESTRA_NEEDS_MODEL:-1}" = 0 ] && return 0
   [ -n "$ORCHESTRA_MODEL" ] || die "set ORCHESTRA_MODEL (provider/model, e.g. deepseek/deepseek-flash) in config.env"
@@ -190,6 +190,7 @@ print(t)' "$tpl")
   # The state file outlives this process on every exit path, so it is removed on all of them: normal, timeout
   # (rc 124) and SIGINT. The path is baked into the trap: the trap runs after this function's locals are out of
   # scope, where "$state" would be unbound (set -u) and would abort the run.
+  # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
   trap "rm -f $(printf '%q' "$state/run.json")" EXIT
   local rc=0
   # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
@@ -510,7 +511,7 @@ except OSError: rows = []
 sys.exit(0 if any(r.get("tree") == tree and r.get("check") == check and r.get("exit") == 0 for r in rows) else 1)
 PY
     then echo "PASS  (proven)  $line"; continue; fi
-    local log="$wt/.orchestra/proofs/$(date +%s)-$n.log" t0=$SECONDS rc=0
+    local log t0=$SECONDS rc=0; log="$wt/.orchestra/proofs/$(date +%s)-$n.log"
     if [ -s "$devenv" ]; then (cd "$wt" && bash -c '. "$1" >/dev/null 2>&1; shift; eval "$1"' _ "$devenv" "$line") > "$log" 2>&1 </dev/null || rc=$?
     else (cd "$wt" && bash -c "$line") > "$log" 2>&1 </dev/null || rc=$?; fi
     local secs=$((SECONDS-t0))
@@ -543,7 +544,7 @@ cmd_land() {
   [ -n "$task" ] || die "usage: orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]"
   local repo state; task_setup "$task" "$wt"
   [ -z "$msgfile" ] || [ -f "$msgfile" ] || die "message file not found: $msgfile"
-  local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/} attempt
+  local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/}
   [ "$remote" != "$ORCHESTRA_BASE" ] || die "ORCHESTRA_BASE must be <remote>/<branch>"
   local title="" spec; spec=$(spec_file "$wt" "$task")
   [ -n "$spec" ] && title=$(sed -n 's/^title:[[:space:]]*//p' "$spec" | head -1)
@@ -556,7 +557,7 @@ cmd_land() {
       kept=$(mktemp); git -C "$wt" log -1 --format=%B "$c" | grep -v '^Proof: ' > "$kept"; break
     done
   fi
-  for attempt in 1 2; do
+  for _ in 1 2; do   # one retry if the base moved
     git -C "$wt" fetch -q "$remote" || die "fetch failed"
     git -C "$wt" rebase -q "$ORCHESTRA_BASE" >/dev/null 2>&1 || { git -C "$wt" rebase --abort 2>/dev/null; die "rebase onto $ORCHESTRA_BASE has conflicts: resolve them in $wt, then land again"; }
     # Squash onto the base we just rebased on (safe: nothing on the base is behind us, so nothing is reverted).
