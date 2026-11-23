@@ -1,0 +1,19 @@
+{"type":"session","version":3,"id":"demo","cwd":"/home/worker/demo-worktrees/T41"}
+{"type":"message_end","message":{"role":"user","content":"implement the task"}}
+{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"fake-1","usage":{"cost":{"total":0.001}}}}
+{"type":"tool_execution_start","toolName":"edit","args":{"path":"/home/worker/demo-worktrees/T41/internal/web/layout.templ"}}
+{"type":"tool_execution_start","toolName":"bash","args":{"command":"git status\n  --short","timeout":30}}
+{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","content":"working"}}
+{"type":"tool_execution_start","toolName":"read","args":{"path":"internal/api/handler.go"}}
+{"type":"turn_end","message":{"role":"assistant"}}
+{"type":"tool_execution_start","toolName":"bash","args":{"command":"pytest tests/ -q --disable-warnings --maxfail=1 --timeout=30 --verbose --color=no"}}
+{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"fake-1","usage":{"cost":{"total":0.002}}}}
+not json at all
+{"type":"tool_execution_start","toolName":"write","args":{"path":"/home/worker/demo-worktrees/T41/internal/web/layout.templ"}}
+{"type":"tool_execution_start","toolName":"edit","args":{"path":"/home/worker/demo-worktrees/T41/.orchestra/report.json"}}
+{"type":"tool_execution_start","toolName":"grep","args":{"pattern":"foo","path":"src"}}
+{"type":"turn_end"}
+{"type":"tool_execution_start","toolName":"read","args":{"path":"/home/worker/demo-worktrees/T41/README.md"}}
+{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","content":"done"}}
+{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"fake-1"}}
+{"type":"tool_execution_start","toolName":"bash","args":{"command":"echo partial line"}}
