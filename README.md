@@ -38,7 +38,7 @@ Requirements: Linux with [bubblewrap](https://github.com/containers/bubblewrap),
 
 ```sh
 git clone https://github.com/bismigel/orchestra && cd orchestra
-./install.sh                         # links orchestra-worker into ~/.local/bin and the Claude Code skill
+./install.sh                         # links the `orchestra-worker` command into ~/.local/bin and the Claude Code skill
 $EDITOR ~/.config/orchestra/config.env   # pick the worker model and how to fetch its API key
 tests/all.sh                         # offline self-tests (no model calls)
 ```
@@ -95,6 +95,14 @@ rotation) and `ops-incident`. They are installed only with `./install.sh --ops`.
    generated noise), `orchestra-worker prove <id>`, `orchestra-worker land <id>`. A worker's report is a claim; a
    proof is a check orchestra ran itself on the exact code ([docs/proofs.md](docs/proofs.md)).
    `orchestra-worker clean` then lists worktrees of landed tasks; `--yes` removes them.
+
+Beyond the loop: `orchestra-worker history` lists every task's runs, cost and outcome (cleaned-up worktrees
+included); `orchestra-worker lessons <id>` drafts lessons-file lines from the spec gaps a review found;
+`orchestra-worker guide <name>` prints a guide's path (`--print` prints its text, and
+`orchestra-worker guide templates` prints the template directory). `orchestra-worker doctor` checks the setup
+before a run does (sandbox, harness, key by fingerprint only, model, base, gate, dev environment, budget).
+`ORCHESTRA_MAX_COST=0.50` stops a run that spends more than that (exit 5), and `orchestra-worker land <id> --pr`
+opens a pull request instead of pushing, for protected branches.
 
 ## Seeing what is happening
 ```

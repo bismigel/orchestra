@@ -38,6 +38,15 @@ first. You do not need to read that output while it runs; the person watching do
 (`sed -n '/^── /,$p' <output>`), or go straight to `review`: the progress lines would cost you tokens for nothing. `ORCHESTRA_PROGRESS=0` turns the
 lines off.
 
+Before the run starts, it can refuse (exit 2): **the task is already running** (two runs would share one worktree,
+session and report), or **the worktree is stale**: the spec changed on the base since the worktree was made and the
+worktree already has work, so the worker would read the old spec. Rebase it, or pass `--allow-stale` when the old
+spec is what you want. A worktree with no work yet is simply rebased.
+
+**Budget.** `ORCHESTRA_MAX_COST=0.50` (dollars per run) stops a run whose responses add up to more: exit 5, and the
+card says `OVER BUDGET`. It is the guard against a looping worker; the timeout only bounds time. Stopping
+`orchestra-worker` itself (Ctrl-C, or your agent stopping the background command) stops the worker too (exit 130).
+
 ## Is it still running?
 `orchestra-worker status` answers that, and nothing else should be used to guess: it reads a per-run state file and
 checks the pid, so a worker that was killed, OOM-ed or timeout-ed shows as **stale** rather than as a run that is
@@ -74,10 +83,29 @@ Workers cannot commit. `orchestra-worker land <task>` does it for you: it commit
 result, and pushes with `ORCHESTRA_PUSH_CMD` only if every check passes, adding `Proof:` trailers. Record the task's
 cost from `orchestra-worker summary` if you track it.
 
+**Protected base branch** (pull requests required): `orchestra-worker land <task> --pr`, or `ORCHESTRA_LAND=pr`.
+Everything up to the proven, squashed commit is the same; then it pushes that commit to `orchestra/<task>`
+(`ORCHESTRA_PR_BRANCH`) and opens a pull request with `ORCHESTRA_PR_CMD` (default: `gh pr create` when `gh` is
+installed; `none` to only push). Placeholders `{branch}`, `{base}`, `{title}`, `{body}` expand as variables, so put
+them in double quotes; a title is data, never code.
+
+**Record what the spec missed.** `orchestra-worker lessons <task>` turns the run's blocking questions, files outside
+the paths and assumptions into dated draft lines for the lessons file. Keep the ones that would change a future spec,
+write the rule each one needs, and append them: `refine` applies that file to every later task. A lessons file that
+stays empty means every spec gap gets rediscovered by a worker, at review time.
+
 Worktrees of landed tasks are clutter. `orchestra-worker clean` lists them with the reason (landed, squash-landed,
 dirty, running, open); `--yes` removes the landed ones with `git worktree remove` (never forced, never a branch).
 Squash-merged tasks (landed through a pull request) need `--include-squashed`; a worktree with uncommitted work or a
-live run is never removed.
+live run is never removed. Before removing anything, `clean --yes` archives each task (runs, exit codes, cost,
+questions, denied egress) to a ledger in the git directory; `orchestra-worker history` shows live and archived tasks
+with the project's total spend.
+
+## Setup check
+`orchestra-worker doctor` before the first run in a repository, and whenever runs fail in odd ways: config files,
+model and allowlist, harness, sandbox (and whether private network namespaces work, for `ORCHESTRA_EGRESS_ALLOW`),
+the key (length and fingerprint only, never the value), base, gate, dev environment, bind mounts, budget and stale
+run state. It exits 1 on anything that would break a run.
 
 **Squash by rebasing, never by resetting a stale worktree.** A worktree is a snapshot of when the task started; a
 `git reset --soft origin/main` from it silently reverts every file that changed on `main` since. `land` rebases

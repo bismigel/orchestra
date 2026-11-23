@@ -12,11 +12,17 @@ A candidate is a git worktree directly under --worktrees for --repo. Each one is
 
 Every directory under <worktrees>/.scout is a scout run and is removed unless its run.json has a live pid.
 
-Nothing is changed without --yes. Removal uses `git worktree remove` without --force, so git refuses anything it
-considers in use; branches, the main checkout and remote-tracking state are never touched.
-Exit 0 on success, 1 if a removal failed, 2 on a usage or repository error.
+Nothing is changed without --yes. Before an entry is removed its runs, cost and outcome are appended to the --ledger
+(JSON Lines); a record that cannot be written leaves the entry in place and counts as a failure. Removal uses
+`git worktree remove` without --force, so git refuses anything it considers in use; branches, the main checkout and
+remote-tracking state are never touched.
+Exit 0 on success, 1 if archiving or a removal failed, 2 on a usage or repository error.
 """
 import argparse, json, os, shutil, subprocess, sys
+
+# python3 -I (safe path) does not put this script's directory on sys.path; history.py lives next to it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import history  # noqa: E402
 
 
 def git(repo, *args):
@@ -129,6 +135,7 @@ def main():
     parser.add_argument("--base", required=True, help="the ref tasks land on (never fetched)")
     parser.add_argument("--yes", action="store_true", help="actually remove what the table marks remove")
     parser.add_argument("--include-squashed", action="store_true", help="also remove squash-landed tasks")
+    parser.add_argument("--ledger", help="archive every removed entry here first (JSON Lines)")
     args = parser.parse_args()
 
     if git(args.repo, "rev-parse", "--git-dir").returncode != 0:
@@ -164,8 +171,28 @@ def main():
             print("nothing to remove")
         return 0
 
+    if removable and not args.ledger:
+        sys.stderr.write("clean: --ledger is required to archive what --yes removes\n")
+        return 2
+
+    # Archive first, in full, so a ledger that cannot be written leaves every worktree untouched.
     failed = False
+    archived = []
     for task, cls, action, path in removable:
+        try:
+            if cls == "scout":
+                record = history.scout_record(task, path, history.utc_now())
+            else:
+                record = history.task_record(task, os.path.join(path, ".orchestra"), history.utc_now(), cls,
+                                             history.branch_of(path), history.head_of(path))
+            history.write_record(args.ledger, record)
+        except Exception as exc:   # any failure to archive means the entry must stay
+            print("could not archive %s: %s" % (task, exc))
+            failed = True
+            continue
+        archived.append((task, cls, action, path))
+
+    for task, cls, action, path in archived:
         if cls == "scout":
             continue   # worktrees first, so git's own checks see the repository as it was
         result = git(args.repo, "worktree", "remove", path)
@@ -178,7 +205,7 @@ def main():
         print("could not remove %s: %s" % (task, message))
         failed = True
 
-    for task, cls, action, path in removable:
+    for task, cls, action, path in archived:
         if cls != "scout":
             continue
         try:

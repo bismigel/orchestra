@@ -5,7 +5,8 @@
 #   orchestra-worker summary <task-id> [--worktree <dir>]
 #   orchestra-worker diff <task-id> [--worktree <dir>] [--stat]     review diff, generated files only in the stat
 #   orchestra-worker prove <task-id> [--worktree <dir>] [--manual "what you checked"]
-#   orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]
+#   orchestra-worker land <task-id> [--pr] [--worktree <dir>] [--message-file <file>]
+#                                             --pr (or ORCHESTRA_LAND=pr): push a branch and open a pull request
 #   orchestra-worker status [--json] [--prune] [--worktree <dir>]
 #                                             what is running now, and what died silently (--prune clears those)
 #   orchestra-worker watch [<task-id>]        live view of running workers: what each one is doing right now
@@ -14,13 +15,18 @@
 #                                             read-only worker maps a draft spec to the code (where things live)
 #   orchestra-worker clean [--yes] [--include-squashed]
 #                                             remove worktrees of landed tasks (lists them without --yes)
+#   orchestra-worker history [--json]         every task's runs, cost and outcome, including cleaned-up ones
+#   orchestra-worker lessons <task-id>        draft lessons.md lines from a run's spec gaps
+#   orchestra-worker doctor                   check the setup: sandbox, harness, key, model, base, gate
+#   orchestra-worker guide [<name>] [--print] path of a guide: orchestrator, planning, ops, security, proofs, …
 #
 # prove runs the landing gate and the task's `proof:` checks in the worktree (outside the sandbox) and records one
 # line per check, bound to a hash of the exact code. land rebases, squashes, proves that code and pushes, with
 # Proof: trailers. A worker's report is a claim; a proof is evidence orchestra produced itself (docs/proofs.md).
 #
 # The orchestrator (a stronger model, or you) decides; the worker implements. See docs/design.md.
-# Exit codes: 0 ok · 2 usage/config error · 3 model policy violation · 4 no or invalid report · 124 timeout ·
+# Exit codes: 0 ok · 2 usage/config error · 3 model policy violation · 4 no or invalid report · 5 over budget
+# (ORCHESTRA_MAX_COST) · 124 timeout · 130 interrupted ·
 # anything else: the harness's own exit code.
 set -euo pipefail
 
@@ -41,8 +47,12 @@ main() {
     review) cmd_review "$here" "$@" ;;
     scout) cmd_scout "$here" "$@" ;;
     clean) cmd_clean "$here" "$@" ;;
-    -h|--help|help|"") sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
-    *) die "unknown command: $cmd (try: run, status, watch, review, scout, prove, land, clean)" ;;
+    history) cmd_history "$here" "$@" ;;
+    lessons) cmd_lessons "$here" "$@" ;;
+    doctor) cmd_doctor "$here" "$@" ;;
+    guide|docs) cmd_guide "$here" "$@" ;;
+    -h|--help|help|"") sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; return 0 ;;
+    *) die "unknown command: $cmd (try: run, status, watch, review, scout, prove, land, clean, history, doctor, guide)" ;;
   esac
 }
 
@@ -193,6 +203,7 @@ print(t)' "$tpl")
     return 0
   fi
 
+  guard_running "$state" "task $task"
   local key=""
   if [ -n "$ORCHESTRA_KEY_ENV" ]; then
     if [ -n "$ORCHESTRA_KEY_CMD" ]; then key=$(bash -c "$ORCHESTRA_KEY_CMD") || die "ORCHESTRA_KEY_CMD failed"
@@ -200,8 +211,9 @@ print(t)' "$tpl")
     [ -n "$key" ] || die "no API key: set ORCHESTRA_KEY_CMD or export $ORCHESTRA_KEY_ENV"
   fi
 
-  log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, profile $ORCHESTRA_PROFILE, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT"
+  log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, profile $ORCHESTRA_PROFILE, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT${ORCHESTRA_MAX_COST:+, max cost \$$ORCHESTRA_MAX_COST}"
   local progress; progress=$(progress_script "$harness_file")
+  check_budget_setup "$progress"
   write_run_state "$state" "$task" "$n" "$wt" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress"
   # The state file outlives this process on every exit path, so it is removed on all of them: normal, timeout
   # (rc 124) and SIGINT. The path is baked into the trap: the trap runs after this function's locals are out of
@@ -209,22 +221,9 @@ print(t)' "$tpl")
   # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
   trap "rm -f $(printf '%q' "$state/run.json"); egress_stop" EXIT
   egress_start "$out.egress.log"
-  local rc=0 t0=$SECONDS follower=""
-  : > "$out.jsonl"
-  # Live progress: one line per tool call on stderr, so a background run's output shows what the worker is doing.
-  # It only reads the event log; it never talks to the worker. ORCHESTRA_PROGRESS=0 turns it off.
-  if [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] && [ -n "$progress" ]; then
-    python3 -I "$progress" follow "$out.jsonl" --task "$task" --start "$(date +%s)" >&2 & follower=$!
-  fi
-  # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
-  set +e
-  timeout --kill-after=30s "$ORCHESTRA_TIMEOUT" "${sandbox[@]}" "${hargv[@]}" \
-    9< <(printf '%s' "$key") < /dev/null >> "$out.jsonl" 2> "$out.err"  # stdin closed: headless harnesses (pi -p)
-                                                                         # read piped stdin and would wait forever
-  rc=$?
-  set -e
+  local rc=0 t0=$SECONDS
+  launch_worker "$task" "$out" "$progress" "$ORCHESTRA_TIMEOUT"; rc=$LAUNCH_RC
   unset key
-  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null || true; wait "$follower" 2>/dev/null || true; fi
   egress_stop
   local secs=$((SECONDS - t0))
 
@@ -316,6 +315,63 @@ check_fresh() {
   fi
   log "freshness: $wt is $behind commits behind $base; the worker reads the older code"
   return 0
+}
+
+# guard_running <state-dir> <what>: refuse to start a second run on a task that is running now. Two runs would share
+# one worktree, one session and one report. A state file whose process is gone is stale and is removed.
+guard_running() {
+  local f="$1/run.json" pid
+  [ -f "$f" ] || return 0
+  pid=$(python3 -I -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("pid", 0)))' "$f" 2>/dev/null || echo 0)
+  if [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then
+    die "$2 is already running (pid $pid): wait for it, or see orchestra-worker status"
+  fi
+  log "removing stale run state of $2 (pid $pid is gone)"; rm -f "$f"
+}
+
+# check_budget_setup <progress-reader>: ORCHESTRA_MAX_COST (USD per run) is enforced by the progress reader, which
+# sums the cost of each response; without a reader, or with a malformed cap, refuse rather than run uncapped.
+check_budget_setup() {
+  local cap=${ORCHESTRA_MAX_COST:-}
+  [ -n "$cap" ] || return 0
+  [[ $cap =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "ORCHESTRA_MAX_COST must be a number of dollars, like 0.50 (got '$cap')"
+  [ -n "$1" ] || die "ORCHESTRA_MAX_COST needs a harness progress reader (lib/harness/<harness>_progress.py)"
+}
+
+# launch_worker <label> <out> <progress-reader> <timeout>: run the sandboxed harness (the caller's sandbox, hargv and
+# key) with the timeout, live progress and the budget cap. Sets LAUNCH_RC. The worker runs in the background so
+# the budget watcher can stop it; Ctrl-C stops it too (a background job ignores SIGINT on its own).
+launch_worker() {
+  local label=$1 out=$2 progress=$3 limit=$4 follower="" cap=${ORCHESTRA_MAX_COST:-0}
+  : > "$out.jsonl"; rm -f "$out.overbudget"
+  set +e
+  # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
+  # stdin is closed: headless harnesses (pi -p) read piped stdin and would wait forever.
+  timeout --kill-after=30s "$limit" "${sandbox[@]}" "${hargv[@]}" \
+    9< <(printf '%s' "$key") < /dev/null >> "$out.jsonl" 2> "$out.err" &
+  ORCH_TPID=$!
+  trap launch_interrupted INT TERM
+  # Live progress: one line per tool call on stderr, so a background run's output shows what the worker is doing.
+  # It only reads the event log; it never talks to the worker. ORCHESTRA_PROGRESS=0 turns the lines off.
+  if [ -n "$progress" ] && { [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] || [ "$cap" != 0 ]; }; then
+    local -a fargs=(follow "$out.jsonl" --task "$label" --start "$(date +%s)" --max-cost "$cap" --kill "$ORCH_TPID"
+                    --flag "$out.overbudget")
+    [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] || fargs+=(--quiet)
+    python3 -I "$progress" "${fargs[@]}" >&2 & follower=$!
+  fi
+  wait "$ORCH_TPID"; LAUNCH_RC=$?
+  trap - INT TERM; ORCH_TPID=""
+  # It may already have exited by itself (it saw the end event).
+  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null || true; wait "$follower" 2>/dev/null || true; fi
+  set -e
+  if [ -f "$out.overbudget" ]; then LAUNCH_RC=5; fi
+  return 0
+}
+
+launch_interrupted() {
+  if [ -n "${ORCH_TPID:-}" ]; then kill -TERM "$ORCH_TPID" 2>/dev/null || true; fi
+  log "interrupted: the worker was stopped"
+  exit 130
 }
 
 # progress_script <harness-file>: the harness's optional progress reader (<harness>_progress.py next to the
@@ -616,6 +672,7 @@ total = 0.0
 for p in glob.glob(f"{state}/runs/run-*.usage.json"): total += load(p).get("cost", 0) or 0
 rep = load(f"{state}/report.json")
 meaning = {"0": "ok", "3": "DISALLOWED MODEL: discard the run", "4": "NO VALID REPORT", "124": "TIMED OUT",
+           "5": "OVER BUDGET: stopped at ORCHESTRA_MAX_COST", "130": "INTERRUPTED",
            "-": ""}.get(rc, "harness failed: read the run's .err file")
 took = ""
 if secs:
@@ -698,13 +755,140 @@ cmd_review() {
     --tree "$(work_tree "$wt")" "${extra[@]}"
 }
 
+# ledger_file <repo>: where cleaned-up tasks are archived (one JSON line each). Inside the git common dir: never
+# committed, shared by every worktree, and it survives `clean`.
+ledger_file() { echo "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)/orchestra/ledger.jsonl"; }
+
+# cmd_history: every task's runs, cost and outcome: live worktrees plus the ledger of cleaned-up ones.
+cmd_history() {
+  local here=$1; shift
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  python3 -I "$here/lib/history.py" --worktrees "$(dirname "$repo")/$(basename "$repo")-worktrees" \
+    --ledger "$(ledger_file "$repo")" "$@"
+}
+
+# cmd_lessons: draft lines for the lessons file from what a run's review shows the spec missed.
+cmd_lessons() {
+  local here=$1; shift; local task="" wt=""
+  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker lessons <task-id> [--worktree <dir>]"
+  local repo state; task_setup "$task" "$wt"
+  python3 -I "$here/lib/review.py" --task "$task" --worktree "$wt" --base "$ORCHESTRA_BASE" \
+    --spec "$(spec_file "$wt" "$task")" --generated "$ORCHESTRA_GENERATED" --checks "$(checks "$wt" "$task")" \
+    --tree "$(work_tree "$wt")" --json | python3 -I "$here/lib/lessons.py" --task "$task"
+}
+
+# cmd_doctor: check everything a run depends on, before a run finds out. Never prints the API key: only its length
+# and a short fingerprint. Exit 1 when anything FAILs; warnings do not fail.
+cmd_doctor() {
+  local here=$1; shift
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
+  local nfail=0 nwarn=0
+  ok_()   { echo "ok    $*"; }
+  warn_() { echo "warn  $*"; nwarn=$((nwarn+1)); }
+  fail_() { echo "FAIL  $*"; nfail=$((nfail+1)); }
+  local g="${XDG_CONFIG_HOME:-$HOME/.config}/orchestra/config.env" f
+  for f in "$g" "$repo/.orchestra/config.env"; do
+    if [ -f "$f" ]; then ok_ "config: $f"; else echo "info  config: $f (not present)"; fi
+  done
+  # Model
+  if [ -z "$ORCHESTRA_MODEL" ]; then fail_ "ORCHESTRA_MODEL is not set"
+  elif model_allowed "$ORCHESTRA_MODEL"; then ok_ "model $ORCHESTRA_MODEL (allowed: $ORCHESTRA_ALLOWED_MODELS)"
+  else fail_ "model $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS ($ORCHESTRA_ALLOWED_MODELS)"; fi
+  # Harness
+  local hf="$here/lib/harness/$ORCHESTRA_HARNESS.sh"
+  case "$ORCHESTRA_HARNESS" in */*) hf=$(realpath -m "$ORCHESTRA_HARNESS") ;; esac
+  if [ -f "$hf" ]; then
+    ok_ "harness $ORCHESTRA_HARNESS ($hf)"
+    if [ "$ORCHESTRA_HARNESS" = pi ]; then
+      if command -v pi >/dev/null; then ok_ "pi $(pi --version 2>/dev/null | head -1) at $(command -v pi)"; else fail_ "pi is not on PATH"; fi
+    fi
+    if [ -n "$(progress_script "$hf")" ]; then ok_ "progress reader: live progress and ORCHESTRA_MAX_COST available"
+    else warn_ "no progress reader for this harness: no live progress, ORCHESTRA_MAX_COST cannot be used"; fi
+  else fail_ "harness '$ORCHESTRA_HARNESS' not found ($hf)"; fi
+  # Sandbox
+  case "$ORCHESTRA_SANDBOX" in
+    bwrap)
+      if ! command -v bwrap >/dev/null; then fail_ "bubblewrap (bwrap) is not installed"
+      elif bwrap --unshare-all --share-net --ro-bind / / --dev /dev --proc /proc true 2>/dev/null; then
+        ok_ "sandbox: bwrap $(bwrap --version 2>/dev/null | awk '{print $2}') can create namespaces"
+        if bwrap --unshare-all --ro-bind / / --dev /dev --proc /proc true 2>/dev/null; then ok_ "sandbox: private network namespaces work (needed by ORCHESTRA_EGRESS_ALLOW)"
+        else warn_ "sandbox: cannot create a private network namespace: ORCHESTRA_EGRESS_ALLOW will fail"; fi
+      else fail_ "sandbox: bwrap cannot create namespaces (unprivileged user namespaces disabled? see docs/security.md)"; fi ;;
+    none) if [ "${ORCHESTRA_ALLOW_UNSANDBOXED:-}" = 1 ]; then warn_ "ORCHESTRA_SANDBOX=none: workers run UNSANDBOXED"
+          else fail_ "ORCHESTRA_SANDBOX=none without ORCHESTRA_ALLOW_UNSANDBOXED=1"; fi ;;
+    *) fail_ "unknown ORCHESTRA_SANDBOX '$ORCHESTRA_SANDBOX'" ;;
+  esac
+  # Egress allowlist
+  if [ -n "$ORCHESTRA_EGRESS_ALLOW" ]; then
+    if python3 -I "$here/lib/egress_proxy.py" --check --allow "$ORCHESTRA_EGRESS_ALLOW" 2>/dev/null; then ok_ "egress allowlist: $ORCHESTRA_EGRESS_ALLOW"
+    else fail_ "egress allowlist is malformed: $(python3 -I "$here/lib/egress_proxy.py" --check --allow "$ORCHESTRA_EGRESS_ALLOW" 2>&1)"; fi
+    [ "$ORCHESTRA_SANDBOX" = bwrap ] || fail_ "ORCHESTRA_EGRESS_ALLOW needs ORCHESTRA_SANDBOX=bwrap"
+  else echo "info  egress: the sandbox shares the host network (set ORCHESTRA_EGRESS_ALLOW to confine it)"; fi
+  # Key: fetched, measured, never shown
+  if [ -z "$ORCHESTRA_KEY_ENV" ]; then echo "info  no API key configured (ORCHESTRA_KEY_ENV empty: fine for local models)"
+  else
+    local k="" how
+    if [ -n "$ORCHESTRA_KEY_CMD" ]; then how="ORCHESTRA_KEY_CMD"; k=$(bash -c "$ORCHESTRA_KEY_CMD" 2>/dev/null </dev/null) || k=""
+    else how="\$$ORCHESTRA_KEY_ENV"; k=${!ORCHESTRA_KEY_ENV:-}; fi
+    if [ -n "$k" ]; then ok_ "key from $how: ${#k} characters, fingerprint $(printf '%s' "$k" | sha256sum | cut -c1-8)"
+    else fail_ "no key from $how (empty or the command failed)"; fi
+    unset k
+  fi
+  # Repository: base, gate, dev environment, caches, budget
+  if git -C "$repo" rev-parse --verify -q "$ORCHESTRA_BASE^{commit}" >/dev/null; then ok_ "base $ORCHESTRA_BASE ($(git -C "$repo" rev-parse --short "$ORCHESTRA_BASE"))"
+  else fail_ "base $ORCHESTRA_BASE does not resolve (fetch, or set ORCHESTRA_BASE)"; fi
+  if [[ $ORCHESTRA_BASE == */* ]] && ! git -C "$repo" remote | grep -qxF "${ORCHESTRA_BASE%%/*}"; then
+    warn_ "base $ORCHESTRA_BASE is not <remote>/<branch> of a configured remote: land needs one"; fi
+  if [ -n "$ORCHESTRA_GATE" ]; then ok_ "gate: $ORCHESTRA_GATE"
+  else warn_ "no ORCHESTRA_GATE: prove and land run only the spec's proof: lines"; fi
+  if [ -n "$ORCHESTRA_DEVENV_CMD" ]; then
+    local t0=$SECONDS
+    if (cd "$repo" && timeout 300 bash -c "$ORCHESTRA_DEVENV_CMD") >/dev/null 2>&1; then ok_ "dev environment command works ($((SECONDS - t0))s)"
+    else fail_ "ORCHESTRA_DEVENV_CMD failed: $ORCHESTRA_DEVENV_CMD"; fi
+  fi
+  local pair src
+  for pair in $ORCHESTRA_RW_BINDS $ORCHESTRA_RO_BINDS; do src=${pair%%:*}; src=${src/#\~/$HOME}
+    [ -d "$src" ] || warn_ "bind source $src does not exist yet (it will be created)"; done
+  if [ -n "${ORCHESTRA_MAX_COST:-}" ]; then
+    if [[ $ORCHESTRA_MAX_COST =~ ^[0-9]+(\.[0-9]+)?$ ]]; then ok_ "budget: at most \$$ORCHESTRA_MAX_COST per run"
+    else fail_ "ORCHESTRA_MAX_COST must be a number of dollars (got '$ORCHESTRA_MAX_COST')"; fi
+  else echo "info  no ORCHESTRA_MAX_COST: runs are limited by ORCHESTRA_TIMEOUT ($ORCHESTRA_TIMEOUT) only"; fi
+  local base_dir; base_dir="$(dirname "$repo")/$(basename "$repo")-worktrees"
+  local stale; stale=$(cmd_status "$here" --json 2>/dev/null | python3 -I -c 'import json,sys; print(sum(1 for r in json.load(sys.stdin)["runs"] if r["state"] == "stale"))' 2>/dev/null || echo 0)
+  [ "${stale:-0}" = 0 ] || warn_ "$stale stale run state file(s): orchestra-worker status --prune"
+  [ -d "$base_dir" ] && echo "info  worktrees: $base_dir"
+  echo "--- $nfail failed, $nwarn warning(s)"
+  [ "$nfail" = 0 ]
+}
+
+# cmd_guide [<name>] [--print]: the absolute path of a guide (or its text), so skills never guess relative paths.
+cmd_guide() {
+  local here=$1; shift; local name="" print=0
+  while [ $# -gt 0 ]; do case "$1" in --print) print=1; shift ;; -*) die "unknown option $1" ;; *) name=$1; shift ;; esac; done
+  local f
+  case "${name:-orchestrator}" in
+    orchestrator|orchestra) f=orchestrator-guide.md ;;
+    planning|plan|refine) f=planning-guide.md ;;
+    ops) f=ops-guide.md ;;
+    security) f=security.md ;;
+    proofs) f=proofs.md ;;
+    design) f=design.md ;;
+    harness) f=adding-a-harness.md ;;
+    templates) echo "$here/templates"; return 0 ;;
+    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, templates)" ;;
+  esac
+  if [ "$print" = 1 ]; then cat "$here/docs/$f"; else echo "$here/docs/$f"; fi
+}
+
 # cmd_clean: remove the worktrees of tasks that have landed (lib/clean.py decides which; it only lists without --yes).
 cmd_clean() {
   local here=$1; shift
   local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
   ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
   python3 -I "$here/lib/clean.py" --repo "$repo" --worktrees "$(dirname "$repo")/$(basename "$repo")-worktrees" \
-    --base "$ORCHESTRA_BASE" "$@"
+    --base "$ORCHESTRA_BASE" --ledger "$(ledger_file "$repo")" "$@"
 }
 
 # cmd_scout: a read-only worker reads a draft spec against the code and reports where things really live, what else
@@ -754,23 +938,17 @@ print(t)' "$here/prompts/scout.md")
   fi
   log "scout $task: read-only, model $ORCHESTRA_MODEL, timeout ${ORCHESTRA_SCOUT_TIMEOUT:-15m}"
   local progress; progress=$(progress_script "$harness_file")
+  check_budget_setup "$progress"
+  guard_running "$state" "scout $task"
   write_run_state "$state" "$task" "$n" "$repo" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress" scout
   # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
   trap "rm -f $(printf '%q' "$state/run.json"); egress_stop" EXIT
   egress_start "$out.egress.log"
-  local rc=0 follower=""
-  : > "$out.jsonl"
-  if [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] && [ -n "$progress" ]; then
-    python3 -I "$progress" follow "$out.jsonl" --task "scout:$task" --start "$(date +%s)" >&2 & follower=$!
-  fi
-  set +e
-  timeout --kill-after=30s "${ORCHESTRA_SCOUT_TIMEOUT:-15m}" "${sandbox[@]}" "${hargv[@]}" \
-    9< <(printf '%s' "$key") < /dev/null >> "$out.jsonl" 2> "$out.err"
-  rc=$?
-  set -e
+  local rc=0
+  launch_worker "scout:$task" "$out" "$progress" "${ORCHESTRA_SCOUT_TIMEOUT:-15m}"; rc=$LAUNCH_RC
   unset key
-  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null || true; wait "$follower" 2>/dev/null || true; fi
   egress_stop
+  [ "$rc" != 5 ] || { log "scout stopped: over budget (ORCHESTRA_MAX_COST)"; return 5; }
   local used m bad=""; used=$(harness_models_used "$out.jsonl")
   for m in $used; do model_allowed "$m" || bad="$bad $m"; done
   harness_usage "$out.jsonl" > "$out.usage.json" || echo '{}' > "$out.usage.json"
@@ -883,10 +1061,44 @@ cmd_prove() {
   prove_all "$wt" "$task"
 }
 
+# land_pr <wt> <task> <base-branch>: for protected bases. Push the proven, squashed commit to its own branch
+# (ORCHESTRA_PR_BRANCH, default orchestra/<task>; force-with-lease, it is the task's own branch, never the base) and
+# open a pull request with ORCHESTRA_PR_CMD ({branch} {base} {title} {body} replaced; default: gh when installed).
+land_pr() {
+  local wt=$1 task=$2 base=$3
+  local prb=${ORCHESTRA_PR_BRANCH:-"orchestra/{task}"}; prb=${prb//\{task\}/$task}
+  [ "$prb" != "$base" ] || die "ORCHESTRA_PR_BRANCH must not be the base branch"
+  local push=${ORCHESTRA_PR_PUSH_CMD:-"git push --force-with-lease origin HEAD:refs/heads/{branch}"}
+  (cd "$wt" && bash -c "${push//\{branch\}/$prb}") >/dev/null 2>&1 || die "could not push $prb (ORCHESTRA_PR_PUSH_CMD)"
+  local title body; title=$(git -C "$wt" log -1 --format=%s); body=$(mktemp)
+  git -C "$wt" log -1 --format=%b > "$body"
+  local cmd=${ORCHESTRA_PR_CMD:-}
+  if [ -z "$cmd" ] && command -v gh >/dev/null; then cmd='gh pr create --base "{base}" --head "{branch}" --title "{title}" --body-file "{body}"'; fi
+  if [ -z "$cmd" ] || [ "$cmd" = none ]; then
+    rm -f "$body"
+    echo "proven and pushed to $prb: open a pull request into $base (set ORCHESTRA_PR_CMD to do it automatically)"; return 0
+  fi
+  # Placeholders become variable references, expanded by the shell that runs the command: the title comes from a
+  # commit message, and an expanded value is never parsed again, so "$(...)" in a title cannot run anything.
+  # Quote the placeholders in the template ("{title}") to keep spaces together.
+  cmd=${cmd//\{branch\}/\$\{ORCHESTRA_PR_HEAD\}}; cmd=${cmd//\{base\}/\$\{ORCHESTRA_PR_BASE\}}
+  cmd=${cmd//\{title\}/\$\{ORCHESTRA_PR_TITLE\}}; cmd=${cmd//\{body\}/\$\{ORCHESTRA_PR_BODY\}}
+  local out; if out=$(cd "$wt" && ORCHESTRA_PR_HEAD=$prb ORCHESTRA_PR_BASE=$base ORCHESTRA_PR_TITLE=$title \
+                      ORCHESTRA_PR_BODY=$body bash -c "$cmd" 2>&1); then
+    rm -f "$body"; echo "proven, pushed to $prb, pull request: $(printf '%s' "$out" | tail -1)"; return 0
+  fi
+  rm -f "$body"; die "pushed $prb, but opening the pull request failed: $(printf '%s' "$out" | tail -1)"
+}
+
 cmd_land() {
-  local here=$1; shift; local task="" wt="" msgfile=""
-  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; --message-file) msgfile=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
-  [ -n "$task" ] || die "usage: orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]"
+  local here=$1; shift; local task="" wt="" msgfile="" pr=0
+  [ "${ORCHESTRA_LAND:-push}" = pr ] && pr=1
+  while [ $# -gt 0 ]; do case "$1" in
+    --worktree) wt=${2:?}; shift 2 ;; --message-file) msgfile=${2:?}; shift 2 ;;
+    --pr) pr=1; shift ;; --push) pr=0; shift ;;
+    -*) die "unknown option $1" ;; *) task=$1; shift ;;
+  esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker land <task-id> [--pr] [--worktree <dir>] [--message-file <file>]"
   local repo state; task_setup "$task" "$wt"
   [ -z "$msgfile" ] || [ -f "$msgfile" ] || die "message file not found: $msgfile"
   local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/}
@@ -932,6 +1144,7 @@ for r in rows:
 print("\n" + "\n".join(lines))
 PY
     git -C "$wt" commit -q --amend -F "$msg"; rm -f "$msg"
+    if [ "$pr" = 1 ]; then land_pr "$wt" "$task" "$branch"; return; fi
     if (cd "$wt" && bash -c "${ORCHESTRA_PUSH_CMD//\{branch\}/$branch}") >/dev/null 2>&1; then
       echo "landed $task: $(git -C "$wt" log -1 --format='%h %s')"; return 0
     fi

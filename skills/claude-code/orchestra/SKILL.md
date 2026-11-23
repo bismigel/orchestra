@@ -5,8 +5,11 @@ description: Orchestrate cheap worker agents (orchestra-worker) on well-specifie
 
 # orchestra: you decide, workers type
 
+**New repository, or anything odd?** Run `orchestra-worker doctor` first: it checks sandbox, harness, key (never
+printed), model, base, gate and dev environment, and says what to fix.
+
 You are the orchestrator. Workers are cheap models running `orchestra-worker` in a sandbox. Follow the full guide
-in `docs/orchestrator-guide.md` next to this skill's source (`orchestra` repository); the essentials:
+printed by `orchestra-worker guide orchestrator`; the essentials:
 
 1. **Classify** the task: `worker` (spec settles everything) · `split` (you write the judgment-heavy rules and the
    required test rows first, or the core itself) · `orchestrator` (do it yourself). Data handling, privacy, auth,
@@ -19,6 +22,9 @@ in `docs/orchestrator-guide.md` next to this skill's source (`orchestra` reposit
 3. **Launch** as a background command so you are notified on exit:
    `orchestra-worker run <id> --spec <file>`; feedback rounds: `orchestra-worker run <id> --feedback <file>`.
    Keep 2-3 workers at most. Model, key and sandbox come from orchestra's config; never pass keys on the command line.
+   Exit 2 before a run means it refused: the task is already running, or its spec changed on the base since the
+   worktree was made (rebase it, or `--allow-stale` if the old spec is intended). Exit 5 means it passed
+   `ORCHESTRA_MAX_COST`: read why before running it again.
    The run's output has one progress line per tool call, for the user. When it ends, read only the card:
    `sed -n '/^── /,$p' <output file>` (or go straight to `review`), not the whole log.
 4. **Review** every run, starting with `orchestra-worker review <id>`: exit meaning, **blocking** questions (decide
@@ -30,5 +36,10 @@ in `docs/orchestrator-guide.md` next to this skill's source (`orchestra` reposit
 5. **Feedback** as a table of failing cases (input, actual, required) plus the rule; after ~3 rounds finish it
    yourself. Small fixes you have already decided: just make them.
 6. **Land**: `orchestra-worker land <id>` (rebase, squash, prove the exact code, push with `Proof:` trailers; it
-   refuses on any failing check). Tell the user what landed, the rounds and the cost (`orchestra-worker summary <id>`).
-   Afterwards `orchestra-worker clean` lists worktrees that can go (`--yes` removes landed ones).
+   refuses on any failing check). Protected base branch: `orchestra-worker land <id> --pr` pushes a branch and opens
+   a pull request instead. Tell the user what landed, the rounds and the cost (`orchestra-worker summary <id>`).
+   Then **record what the spec missed**: `orchestra-worker lessons <id>` drafts lines from the run's blocking
+   questions, outside-path files and assumptions; keep the ones that would change a future spec, write the rule,
+   append them to the lessons file (refine reads it). `review` shows `lessons N spec gap(s)` when there are any.
+   Afterwards `orchestra-worker clean` lists worktrees that can go (`--yes` archives each to the ledger, then
+   removes it); `orchestra-worker history` shows every task's runs and cost, cleaned-up ones included.

@@ -4,11 +4,12 @@ Checks every task file (Markdown with front matter) without a model:
   L1  front matter: id, title, status, depends, delegation (ops profile: risk, rollback too)
   L5  Owns disjoint from every other open task, unless one depends on the other (transitively)
   L6  paths in Owns/Touches exist on the base branch, or are clearly new (a glob, or marked "(new)")
-  L8  Acceptance: at least one command in backticks; screenshots and browser checks marked Orchestrator/Human
+  L8  Acceptance: at least one command in backticks; screenshots and browser checks marked Orchestrator/Human;
+      a warning when there is no `proof:` line (land would prove only the gate)
   L10 every dependency exists; a ready task's dependencies are done or chained
   L11 Out of scope section present
 A task is done when the base branch has a commit whose subject starts with "<id>:".
-Exit 0 when every checked task passes, 1 otherwise, 2 on usage errors.
+Exit 0 when every checked task passes, 1 otherwise, 2 on usage errors. --strict makes warnings fail too.
 """
 import argparse, json, os, re, subprocess, sys
 
@@ -18,6 +19,7 @@ DELEGATION = {"worker", "split", "orchestrator"}
 STATUS = {"draft", "ready", "done"}
 UI_ONLY = re.compile(r"\b(screenshot|screenshots|in a browser|browser\)|visually|by eye)\b", re.I)
 HUMAN = re.compile(r"\b(orchestrator|human)\b", re.I)
+PROOF = re.compile(r"proof:\s*`")
 
 
 def git(*args, cwd):
@@ -103,6 +105,7 @@ def main(argv):
     ap.add_argument("--base", default=os.environ.get("ORCHESTRA_BASE", "origin/main"))
     ap.add_argument("--profile", default=os.environ.get("ORCHESTRA_PROFILE", "dev"))
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--strict", action="store_true", help="warnings count as errors (exit 1)")
     a = ap.parse_args(argv)
 
     repo = git("rev-parse", "--show-toplevel", cwd=os.getcwd()).stdout.strip()
@@ -188,6 +191,8 @@ def main(argv):
             for line in acc.splitlines():
                 if UI_ONLY.search(line) and not HUMAN.search(line):
                     errs.append(f"L8 visual check not marked Orchestrator/Human: {line.strip()[:90]}")
+        if "acceptance" in sec and not PROOF.search(acc):
+            warns.append("L8 no proof: line: land will prove only the gate")
 
         for d in deps.get(t, []):
             if d not in tasks:
@@ -200,6 +205,9 @@ def main(argv):
 
         results[t] = {"errors": errs, "warnings": warns}
         failed |= bool(errs)
+
+    if a.strict and any(r["warnings"] for r in results.values()):
+        failed = True
 
     if a.json:
         print(json.dumps(results, indent=2))

@@ -172,7 +172,13 @@ def cmd_tail(path, count):
 
 
 class Follower:
-    def __init__(self, path, task, start, heartbeat, poll):
+    def __init__(self, path, task, start, heartbeat, poll, max_cost=0.0, kill_pid=0, flag="", quiet=False):
+        self.max_cost = max_cost      # 0: no cap
+        self.kill_pid = kill_pid      # the run's process, stopped when the cap is passed
+        self.flag = flag              # written when the cap stopped the run, so the run can say why
+        self.quiet = quiet            # cap only, no progress lines (ORCHESTRA_PROGRESS=0)
+        self.cost = 0.0
+        self.tripped = False
         self.path = path
         self.task = task
         self.start = start
@@ -187,7 +193,9 @@ class Follower:
         self.last_tool = start
         self.last_beat = start
 
-    def emit(self, text):
+    def emit(self, text, always=False):
+        if self.quiet and not always:
+            return
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
 
@@ -213,6 +221,35 @@ class Follower:
             self.last_beat = now
         elif kind == "agent_end":
             self.agent_end = True
+        elif kind == "message_end":
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+                cost = usage.get("cost") if isinstance(usage.get("cost"), dict) else {}
+                try:
+                    self.cost += float(cost.get("total") or 0)
+                except (TypeError, ValueError):
+                    pass
+                self.check_budget()
+
+    def check_budget(self):
+        """Stop the run once its cost passes the cap: a looping worker cannot spend more than you allowed."""
+        if self.tripped or self.max_cost <= 0 or self.cost <= self.max_cost:
+            return
+        self.tripped = True
+        self.emit(f"{self.task} {self.elapsed()} ■ over budget: ${self.cost:.4f} > ${self.max_cost:.4f}, stopping the run",
+                  always=True)
+        if self.flag:
+            try:
+                with open(self.flag, "w", encoding="utf-8") as f:
+                    f.write(f"{self.cost:.6f} {self.max_cost:.6f}\n")
+            except OSError:
+                pass
+        if self.kill_pid > 0:
+            try:
+                os.kill(self.kill_pid, signal.SIGTERM)
+            except OSError:
+                pass
 
     def drain(self, events):
         chunk = events.read()
@@ -269,6 +306,10 @@ def build_parser():
     follow.add_argument("--start", required=True, type=float)
     follow.add_argument("--heartbeat", type=float, default=60.0)
     follow.add_argument("--poll", type=float, default=0.5)
+    follow.add_argument("--max-cost", type=float, default=0.0)
+    follow.add_argument("--kill", type=int, default=0)
+    follow.add_argument("--flag", default="")
+    follow.add_argument("--quiet", action="store_true")
 
     snapshot = sub.add_parser("snapshot", help="one JSON object summarising the log")
     snapshot.add_argument("events")
@@ -285,7 +326,8 @@ def main(argv=None):
         return cmd_snapshot(args.events)
     if args.command == "tail":
         return cmd_tail(args.events, args.lines)
-    follower = Follower(args.events, args.task, args.start, args.heartbeat, args.poll)
+    follower = Follower(args.events, args.task, args.start, args.heartbeat, args.poll,
+                        args.max_cost, args.kill, args.flag, args.quiet)
     return follower.run()
 
 
