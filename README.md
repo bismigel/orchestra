@@ -87,6 +87,9 @@ See [docs/ops-guide.md](docs/ops-guide.md).
 5. **Feedback** (`--feedback review.md`, same session), or prove and land: `orchestra-worker diff <id>` (no
    generated noise), `orchestra-worker prove <id>`, `orchestra-worker land <id>`. A worker's report is a claim; a
    proof is a check orchestra ran itself on the exact code ([docs/proofs.md](docs/proofs.md)).
+6. Watch it happen: `orchestra-worker status` lists every run with its elapsed time, and says **stale** for a run
+   whose process is gone — the one answer you need before waiting on anything. `--json` feeds an editor widget
+   ([examples/pi/workers.ts](examples/pi/workers.ts) renders it in pi's footer).
 
 The full loop is in [docs/orchestrator-guide.md](docs/orchestrator-guide.md); the reasoning in
 [docs/design.md](docs/design.md); the threat model and known gaps in [docs/security.md](docs/security.md).
