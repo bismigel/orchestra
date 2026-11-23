@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # orchestra-worker: run one sandboxed worker agent on one task, then check what it did.
 #
-#   orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>] [--dry-run]
+#   orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>] [--dry-run] [--allow-stale]
 #   orchestra-worker summary <task-id> [--worktree <dir>]
 #   orchestra-worker diff <task-id> [--worktree <dir>] [--stat]     review diff, generated files only in the stat
 #   orchestra-worker prove <task-id> [--worktree <dir>] [--manual "what you checked"]
@@ -85,18 +85,19 @@ load_config() {
 
 cmd_run() {
   local here=$1; shift
-  local task="" spec="" wt="" feedback="" dry=0
+  local task="" spec="" wt="" feedback="" dry=0 allow_stale=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --spec) spec=${2:?}; shift 2 ;;
       --worktree) wt=${2:?}; shift 2 ;;
       --feedback) feedback=${2:?}; shift 2 ;;
       --dry-run) dry=1; shift ;;
+      --allow-stale) allow_stale=1; shift ;;
       -*) die "unknown option $1" ;;
       *) [ -z "$task" ] || die "one task id only"; task=$1; shift ;;
     esac
   done
-  [ -n "$task" ] || die "usage: orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>]"
+  [ -n "$task" ] || die "usage: orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>] [--allow-stale]"
   [[ $task =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
 
   local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
@@ -148,6 +149,7 @@ cmd_run() {
   if [ -z "$feedback" ] && [ ! -f "$wt/$spec" ]; then
     cp "$spec" "$state/spec.md"; spec=".orchestra/spec.md"
   fi
+  check_fresh "$wt" "$spec" "$ORCHESTRA_BASE" "$dry" "$allow_stale" "$feedback"
   grep -qxF '.orchestra/*' "$common/info/exclude" 2>/dev/null || printf '%s\n' '.orchestra/*' '!.orchestra/config.env' >> "$common/info/exclude"
 
   local devenv=""
@@ -240,6 +242,80 @@ print(t)' "$tpl")
   print_summary "$task" "$state" "$n" "$rc" "$secs"
   git -C "$wt" status --short | grep -v '^?? \.orchestra/' | head -15 >&2 || true
   return "$rc"
+}
+
+# check_fresh <worktree> <spec> <base> <dry-run> <allow-stale> [<feedback>]: before a first run, refuse a worktree
+# whose spec changed on the base since it was made, or rebase one that has no work yet. A worker reading an old
+# spec silently implements the wrong thing (issue #1); a worktree with no work loses nothing when rebased.
+check_fresh() {
+  local wt=$1 spec=$2 base=$3 dry=$4 allow_stale=$5 feedback=${6:-}
+  if [ -n "$feedback" ]; then return 0; fi   # later rounds reuse the worktree on purpose
+
+  # A <remote>/<branch> base is fetched (never on a dry run), so the check sees what is really on the base.
+  local remote branch
+  if [[ $base == */* ]]; then
+    remote=${base%%/*}; branch=${base#*/}
+    if git -C "$wt" remote | grep -qxF "$remote"; then
+      if [ "$dry" != 1 ] && ! git -C "$wt" fetch -q "$remote" "$branch"; then
+        log "freshness: could not fetch $remote; checking against the last fetched $base"
+      fi
+    fi
+  fi
+
+  if ! git -C "$wt" rev-parse --verify -q "$base^{commit}" >/dev/null; then
+    log "freshness: not checked ($base not found)"
+    return 0
+  fi
+
+  local behind; behind=$(git -C "$wt" rev-list --count "HEAD..$base")
+  if [ "$behind" = 0 ]; then return 0; fi
+
+  # Work: uncommitted changes outside .orchestra/, or commits that change files. An empty claim commit is not work.
+  local work=0 line path
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path=${line:3}
+    path=${path#\"}   # git quotes a path with spaces: ".orchestra/a b" is still .orchestra/
+    case "$path" in .orchestra/*) continue ;; esac
+    work=1; break
+  done < <(git -C "$wt" status --porcelain --untracked-files=all)
+  if [ "$work" = 0 ] && ! git -C "$wt" diff --quiet "$base...HEAD"; then work=1; fi
+
+  # Only a repository spec can have changed on the base; an outside spec is copied in as .orchestra/spec.md.
+  local spec_changed=0
+  if [ "$spec" != ".orchestra/spec.md" ]; then
+    if git -C "$wt" cat-file -e "$base:$spec" 2>/dev/null && \
+       ! git -C "$wt" show "$base:$spec" | cmp -s - "$wt/$spec"; then
+      spec_changed=1
+    fi
+  fi
+
+  if [ "$allow_stale" = 1 ]; then
+    log "freshness: $wt is $behind commits behind $base (--allow-stale)"
+    return 0
+  fi
+  if [ "$work" = 0 ]; then
+    if [ "$dry" = 1 ]; then
+      log "dry run: freshness would rebase $wt onto $base ($behind commits behind)"
+      return 0
+    fi
+    if ! git -C "$wt" rebase -q "$base"; then
+      git -C "$wt" rebase --abort >/dev/null 2>&1 || true
+      die "freshness: rebase onto $base failed; fix $wt by hand"
+    fi
+    log "freshness: worktree had no work and was $behind commits behind $base: rebased"
+    return 0
+  fi
+  if [ "$spec_changed" = 1 ]; then
+    local why="$spec changed on $base since this worktree was made ($behind commits behind). The worker would read the old spec. Rebase it (git -C $wt rebase $base) or pass --allow-stale."
+    if [ "$dry" = 1 ]; then
+      log "dry run: freshness would refuse: $why"
+      return 0
+    fi
+    die "freshness: $why"
+  fi
+  log "freshness: $wt is $behind commits behind $base; the worker reads the older code"
+  return 0
 }
 
 # progress_script <harness-file>: the harness's optional progress reader (<harness>_progress.py next to the
