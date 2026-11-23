@@ -89,7 +89,7 @@ rotation) and `ops-incident`. They are installed only with `./install.sh --ops`.
 3. **Launch**: `orchestra-worker run <id> --spec spec.md`. Run it in the background; 2-3 workers at a time.
 4. **Review**: `orchestra-worker review <id>` puts it on one screen: how the run ended, **blocking** questions,
    **assumed** calls, files changed outside the spec's paths, the worker's claimed checks, proofs for the exact
-   code, and a ranked diff stat. Then the diff, your own run of the checks, and probes with your own inputs.
+   code, and a ranked diff stat (`--json` for editor widgets). Then the diff, your own run of the checks, and probes with your own inputs.
 5. **Feedback** (`--feedback review.md`, same session), or prove and land: `orchestra-worker diff <id>` (no
    generated noise), `orchestra-worker prove <id>`, `orchestra-worker land <id>`. A worker's report is a claim; a
    proof is a check orchestra ran itself on the exact code ([docs/proofs.md](docs/proofs.md)).
