@@ -1,6 +1,7 @@
 # Proposal 0002: an `ops` profile for running infrastructure
 
 Status: **implemented in 0.2.0** (2026-11-22)
+Update 0.5.0: the eight skills became two (ops-change, ops-incident); the playbooks are change types in docs/ops-guide.md.
 
 ## Why a separate profile
 Software tasks change code that is reviewed and then shipped. Operations tasks change **live systems**: a cluster, a

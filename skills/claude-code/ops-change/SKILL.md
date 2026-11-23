@@ -1,8 +1,17 @@
 ---
 name: ops-change
-description: Make a change to infrastructure the GitOps way - ticket with risk class and rollback, preflight, worker draft, rendered-diff review, PR, watch window, record. Use for any cluster, network, DNS, backup or host change request.
+description: Infrastructure changes the GitOps way - preflight (blast radius, measured state, rollback), worker draft, rendered-diff review, PR, watch window, record. Covers new apps, upgrades, backup changes and restore drills, and secret rotation. Use for any cluster, network, DNS, backup, secret or host change, and to review an ops diff or an orchestra worker's ops run.
 ---
 
 # ops-change
 
-Follow "The change loop" in `docs/ops-guide.md` in the orchestra repository (from this skill's folder: `../../../docs/ops-guide.md`). Classify first (worker / split / orchestrator), set `risk` and `rollback`, preflight before drafting, review the rendered diff, and never apply anything directly: changes reach live systems only through Git and the controller (or a human apply). Roll back on a failed watch, don't debug forward.
+Follow "The change loop" in `docs/ops-guide.md` (from this skill's folder: `../../../docs/ops-guide.md`), then pick
+the checklist for the change type (new app, upgrade, backup change and restore drill, secret rotation).
+Non-negotiables:
+- Classify first: worker / split / orchestrator.
+- `risk` and `rollback` set; current state measured with a quoted command.
+- Review the rendered diff, not only the source.
+- Nothing applied directly, only through Git and the controller (or a human apply).
+- Roll back on a failed watch, don't debug forward.
+- Secret values never in the model's context; secret rotation is orchestrator-only.
+- A backup is not done until a restore was tested.
