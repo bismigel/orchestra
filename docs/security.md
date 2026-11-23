@@ -24,9 +24,30 @@ one API key variable exist inside.
 - The harness itself holds the key in its environment, so the worker's model could ask the shell to print it. Use a
   **dedicated key with a spend limit** for workers, never your main key.
 
+## Network: open by default, or an allowlist
+By default the sandbox shares the host network (`--share-net`), because the worker must reach its model API and
+package registries. A worker could then send the worktree's contents or its key anywhere.
+
+Set `ORCHESTRA_EGRESS_ALLOW` to confine it:
+```sh
+ORCHESTRA_EGRESS_ALLOW='api.deepseek.com proxy.golang.org sum.golang.org'
+```
+- The sandbox gets its **own network namespace with only loopback**: no route out, no DNS.
+- Its one way out is a unix socket to **orchestra's egress proxy, running outside the sandbox**
+  (`lib/egress_proxy.py`). The proxy accepts only `CONNECT host:port` to listed hosts (port 443 unless the entry
+  names one; `*.example.com` for subdomains; IP addresses only when listed literally) and refuses everything else,
+  including plain HTTP. The policy lives outside, so nothing the worker does inside can widen it.
+- Inside, a forwarder on `127.0.0.1:3128` relays to that socket and `HTTPS_PROXY`/`HTTP_PROXY` (and
+  `NODE_USE_ENV_PROXY=1` for Node) point at it. Tools that ignore proxy variables simply cannot connect: the run
+  fails closed, it never falls back to an open network.
+- Every attempt is logged to `runs/run-N.egress.log` (time, allow/deny, host:port; never content), and the finish
+  card counts them: `egress    12 allowed · 1 host(s) denied: pastebin.com`.
+- Needs `ORCHESTRA_SANDBOX=bwrap`; a bad allowlist entry stops the run before it starts.
+- List the model API host first, then only what the task needs (module proxies, registries). An allowed host can
+  still receive data: the allowlist bounds where data can go, not what is sent there.
+
 ## Known gaps (contributions welcome)
-- **Network is open** (`--share-net`) because the worker must reach its model API and package registries. A worker
-  could exfiltrate the worktree's contents or its key. Planned: an optional allowlisting proxy.
+- **Network is open unless `ORCHESTRA_EGRESS_ALLOW` is set** (above).
 - **No CPU/memory limits** beyond the wall-clock timeout. Use `systemd-run --user -p MemoryMax=…` around the
   command if needed.
 - **macOS/Windows** have no bubblewrap. `ORCHESTRA_SANDBOX=none` (with `ORCHESTRA_ALLOW_UNSANDBOXED=1`) runs

@@ -28,6 +28,7 @@ set -euo pipefail
 # editing this script while a worker runs cannot corrupt that run (bash otherwise reads scripts lazily).
 main() {
   local here; here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+  ORCHESTRA_HERE=$here
   local cmd=${1:-}; shift || true
   case "$cmd" in
     run) cmd_run "$here" "$@" ;;
@@ -72,6 +73,7 @@ load_config() {
   ORCHESTRA_CHECKS=${ORCHESTRA_CHECKS:-the test and lint commands documented in the repository}
   ORCHESTRA_RW_BINDS=${ORCHESTRA_RW_BINDS:-}
   ORCHESTRA_RO_BINDS=${ORCHESTRA_RO_BINDS:-}
+  ORCHESTRA_EGRESS_ALLOW=${ORCHESTRA_EGRESS_ALLOW:-}            # empty: the sandbox shares the host network
   ORCHESTRA_BASE=${ORCHESTRA_BASE:-origin/main}                 # what tasks are reviewed against and land on
   ORCHESTRA_GATE=${ORCHESTRA_GATE:-}                            # the repository's landing gate, one shell command
   ORCHESTRA_TASKS_DIR=${ORCHESTRA_TASKS_DIR:-docs/work/tasks}
@@ -179,6 +181,7 @@ print(t)' "$tpl")
   rm -f "$state/report.json"
 
   local -a hargv; harness_argv hargv "$task" "$state" "$prompt"
+  egress_plan "$dry"
   local -a sandbox; build_sandbox sandbox "$wt" "$gitdir" "$common" "$state" "$devenv"
 
   if [ "$dry" = 1 ]; then
@@ -202,7 +205,8 @@ print(t)' "$tpl")
   # (rc 124) and SIGINT. The path is baked into the trap: the trap runs after this function's locals are out of
   # scope, where "$state" would be unbound (set -u) and would abort the run.
   # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
-  trap "rm -f $(printf '%q' "$state/run.json")" EXIT
+  trap "rm -f $(printf '%q' "$state/run.json"); egress_stop" EXIT
+  egress_start "$out.egress.log"
   local rc=0 t0=$SECONDS follower=""
   : > "$out.jsonl"
   # Live progress: one line per tool call on stderr, so a background run's output shows what the worker is doing.
@@ -218,7 +222,8 @@ print(t)' "$tpl")
   rc=$?
   set -e
   unset key
-  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null; wait "$follower" 2>/dev/null || true; fi
+  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null || true; wait "$follower" 2>/dev/null || true; fi
+  egress_stop
   local secs=$((SECONDS - t0))
 
   local used; used=$(harness_models_used "$out.jsonl")
@@ -408,7 +413,10 @@ build_sandbox() {
     *) die "unknown ORCHESTRA_SANDBOX '$ORCHESTRA_SANDBOX' (bwrap, none)" ;;
   esac
   local home=/home/worker
-  _sb=(bwrap --die-with-parent --new-session --unshare-all --share-net
+  # Network: shared with the host by default. With ORCHESTRA_EGRESS_ALLOW, a private network namespace (loopback
+  # only) whose one way out is the egress proxy's socket, bound in below.
+  local -a net=(--share-net); [ -n "${EGRESS_SOCK:-}" ] && net=()
+  _sb=(bwrap --die-with-parent --new-session --unshare-all "${net[@]}"
        --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run)
   local p
   for p in /usr /bin /sbin /lib /lib64 /lib32 /etc /nix /opt /run/current-system; do
@@ -425,9 +433,47 @@ build_sandbox() {
     [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--ro-bind "$src" "$dst"); done
   for pair in $ORCHESTRA_RW_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
     [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--bind "$src" "$dst"); done
+  if [ -n "${EGRESS_SOCK:-}" ]; then
+    _sb+=(--bind "$EGRESS_SOCK" /run/orchestra-egress.sock
+          --ro-bind "$ORCHESTRA_HERE/lib/egress_forward.py" /run/orchestra-egress-forward.py)
+  fi
   _sb+=(--clearenv --setenv HOME "$home" --setenv USER worker --setenv LANG C.UTF-8 --setenv TERM dumb
-        --setenv PATH "$(sandbox_path)"
-        --chdir "$wt" /usr/bin/env bash -c "$INNER" "$ORCHESTRA_KEY_ENV" "${devenv:-}")
+        --setenv PATH "$(sandbox_path)")
+  [ -n "${EGRESS_SOCK:-}" ] && _sb+=(--setenv ORCHESTRA_EGRESS_PORT 3128)
+  _sb+=(--chdir "$wt" /usr/bin/env bash -c "$INNER" "$ORCHESTRA_KEY_ENV" "${devenv:-}")
+}
+
+# ---- egress allowlist (ORCHESTRA_EGRESS_ALLOW; docs/security.md) ----------------------------------------------------
+# egress_plan <dry>: choose the proxy socket path before the sandbox is built. A short /tmp path: unix sockets are
+# limited to about 108 bytes, and worktree paths can be long.
+egress_plan() {
+  EGRESS_SOCK=""; EGRESS_PID=""; EGRESS_DIR=""
+  [ -n "$ORCHESTRA_EGRESS_ALLOW" ] || return 0
+  [ "$ORCHESTRA_SANDBOX" = bwrap ] || die "ORCHESTRA_EGRESS_ALLOW needs ORCHESTRA_SANDBOX=bwrap (without a sandbox nothing can be enforced)"
+  python3 -I "$ORCHESTRA_HERE/lib/egress_proxy.py" --check --allow "$ORCHESTRA_EGRESS_ALLOW" || exit 2
+  if [ "${1:-0}" = 1 ]; then EGRESS_SOCK=/tmp/orchestra-egress.DRYRUN/s; return 0; fi
+  EGRESS_DIR=$(mktemp -d /tmp/orchestra-egress.XXXXXX); EGRESS_SOCK="$EGRESS_DIR/s"
+}
+
+# egress_start <log>: start the proxy outside the sandbox and wait for its socket. Fails the run if it cannot start:
+# a run that was asked to be confined never runs unconfined.
+egress_start() {
+  [ -n "${EGRESS_SOCK:-}" ] || return 0
+  python3 -I "$ORCHESTRA_HERE/lib/egress_proxy.py" --socket "$EGRESS_SOCK" --allow "$ORCHESTRA_EGRESS_ALLOW" --log "$1" \
+    </dev/null 2>"$EGRESS_DIR/err" & EGRESS_PID=$!
+  local i=0
+  while [ ! -S "$EGRESS_SOCK" ]; do
+    kill -0 "$EGRESS_PID" 2>/dev/null || die "egress proxy failed: $(cat "$EGRESS_DIR/err" 2>/dev/null)"
+    i=$((i+1)); [ "$i" -le 50 ] || die "egress proxy did not start"
+    sleep 0.1
+  done
+  log "egress: only $ORCHESTRA_EGRESS_ALLOW (log: $1)"
+}
+
+egress_stop() {
+  if [ -n "${EGRESS_PID:-}" ]; then kill "$EGRESS_PID" 2>/dev/null || true; wait "$EGRESS_PID" 2>/dev/null || true; EGRESS_PID=""; fi
+  if [ -n "${EGRESS_DIR:-}" ]; then rm -rf "$EGRESS_DIR"; EGRESS_DIR=""; fi
+  return 0
 }
 
 # The worker's PATH: your PATH with symlinks resolved, keeping only directories mounted in the sandbox (so the same
@@ -449,6 +495,14 @@ sandbox_path() {
 INNER='k=$(cat <&9 2>/dev/null); exec 9<&-
 if [ -n "$0" ] && [ -n "$k" ]; then export "$0=$k"; fi; unset k
 if [ -n "$1" ]; then . "$1" >/dev/null 2>&1; fi
+if [ -n "${ORCHESTRA_EGRESS_PORT:-}" ]; then
+  python3 -I /run/orchestra-egress-forward.py /run/orchestra-egress.sock "$ORCHESTRA_EGRESS_PORT" &
+  i=0; until python3 -I -c "import socket,sys; socket.create_connection((\"127.0.0.1\", int(sys.argv[1])), 1)" "$ORCHESTRA_EGRESS_PORT" 2>/dev/null; do
+    i=$((i+1)); if [ "$i" -gt 50 ]; then echo "orchestra: the egress forwarder did not start" >&2; exit 125; fi; sleep 0.1
+  done
+  p=http://127.0.0.1:$ORCHESTRA_EGRESS_PORT; n=localhost,127.0.0.1,::1
+  export HTTPS_PROXY=$p HTTP_PROXY=$p https_proxy=$p http_proxy=$p ALL_PROXY=$p NO_PROXY=$n no_proxy=$n NODE_USE_ENV_PROXY=1
+fi
 shift; exec "$@"'
 
 
@@ -500,6 +554,15 @@ if rep:
           f" · {len(rep.get('out_of_scope_needed') or [])} outside scope")
     for q in blocking: print(f"   BLOCKING  {q}")
     for q in assumed: print(f"   assumed   {q}")
+eg = f"{state}/runs/run-{n}.egress.log"
+try:
+    rows = [l.split() for l in open(eg) if l.strip()]
+except OSError:
+    rows = None
+if rows is not None:
+    allow = sum(1 for r in rows if len(r) > 1 and r[1] == "allow")
+    denied = sorted({r[2] for r in rows if len(r) > 2 and r[1] == "deny"})
+    print(f"   egress    {allow} allowed · {len(denied)} host(s) denied" + (f": {', '.join(denied[:5])}" if denied else ""))
 print(f"   next      orchestra-worker review {task}")
 PY
 }
@@ -604,6 +667,7 @@ print(t)' "$here/prompts/scout.md")
   shopt -s nullglob; local runs=("$state"/runs/run-*.jsonl); shopt -u nullglob
   local n=$(( ${#runs[@]} + 1 )) out="$state/runs/run-$(( ${#runs[@]} + 1 ))"
   local -a hargv; harness_argv hargv "scout-$task" "$state" "$prompt"
+  egress_plan "${ORCHESTRA_DRY_RUN:-0}"
   local -a sandbox; SCOUT=1 build_sandbox sandbox "$repo" "$common" "$common" "$state" "$devenv"
   if [ "${ORCHESTRA_DRY_RUN:-}" = 1 ]; then printf '%q ' "${sandbox[@]}" "${hargv[@]:0:${#hargv[@]}-1}" "<prompt>"; echo; return 0; fi
   local key=""
@@ -616,7 +680,8 @@ print(t)' "$here/prompts/scout.md")
   local progress; progress=$(progress_script "$harness_file")
   write_run_state "$state" "$task" "$n" "$repo" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress" scout
   # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
-  trap "rm -f $(printf '%q' "$state/run.json")" EXIT
+  trap "rm -f $(printf '%q' "$state/run.json"); egress_stop" EXIT
+  egress_start "$out.egress.log"
   local rc=0 follower=""
   : > "$out.jsonl"
   if [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] && [ -n "$progress" ]; then
@@ -628,7 +693,8 @@ print(t)' "$here/prompts/scout.md")
   rc=$?
   set -e
   unset key
-  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null; wait "$follower" 2>/dev/null || true; fi
+  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null || true; wait "$follower" 2>/dev/null || true; fi
+  egress_stop
   local used m bad=""; used=$(harness_models_used "$out.jsonl")
   for m in $used; do model_allowed "$m" || bad="$bad $m"; done
   harness_usage "$out.jsonl" > "$out.usage.json" || echo '{}' > "$out.usage.json"
@@ -672,9 +738,11 @@ spec_file() {
 
 # checks <wt> <task>: the gate, then every `proof:` line of the spec (- proof: `command`), one per line.
 checks() {
-  [ -n "$ORCHESTRA_GATE" ] && printf '%s\n' "$ORCHESTRA_GATE"
-  local spec; spec=$(spec_file "$1" "$2")
-  [ -n "$spec" ] && grep -oE 'proof:[[:space:]]*`[^`]+`' "$spec" | sed -E 's/^proof:[[:space:]]*`(.*)`$/\1/'
+  {
+    [ -n "$ORCHESTRA_GATE" ] && printf '%s\n' "$ORCHESTRA_GATE"
+    local spec; spec=$(spec_file "$1" "$2")
+    [ -n "$spec" ] && grep -oE 'proof:[[:space:]]*`[^`]+`' "$spec" | sed -E 's/^proof:[[:space:]]*`(.*)`$/\1/'
+  } | awk '!seen[$0]++'   # a spec proof that repeats the gate runs once
   return 0
 }
 

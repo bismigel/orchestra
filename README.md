@@ -13,7 +13,8 @@ remainder and report back.
 - **Orchestrator-agnostic**: a plain-markdown [orchestrator guide](docs/orchestrator-guide.md) any agent can follow,
   plus a ready [Claude Code skill](skills/claude-code/orchestra/SKILL.md).
 - **Sandboxed** (bubblewrap): a worker sees its own git worktree and nothing else from your home. It cannot commit
-  or push. Its API key arrives on a file descriptor, never on a command line or on disk.
+  or push. Its API key arrives on a file descriptor, never on a command line or on disk. Optionally
+  (`ORCHESTRA_EGRESS_ALLOW`) it can reach only the hosts you list.
 - **Costs cents**: per-run tokens and cost are summed from the harness's own log.
 
 ```
@@ -123,7 +124,7 @@ Other orchestrators: reference `docs/orchestrator-guide.md` from their `AGENTS.m
 
 ## Status
 Early and evolving: the interface (`run`, `summary`, `status`, `review`, `diff`, `prove`, `land`, the report schema, the config keys) is meant to stay stable
-while the inside improves. Planned: an egress-allowlisting proxy (issue #2) for the sandbox, more harness adapters, macOS
+while the inside improves. Planned: more harness adapters, macOS
 sandboxing, and an optional long-running worker service for unattended queues. Ideas and adapters are welcome.
 
 ## Contributing

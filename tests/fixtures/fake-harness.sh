@@ -15,7 +15,10 @@ harness_argv() {
     case "$report" in
       valid) printf "{\"task\":\"%s\",\"status\":\"done\",\"summary\":\"ok\",\"files_changed\":[],\"checks\":[],\"open_questions\":[]}" "$task" > .orchestra/report.json ;;
       invalid) echo "{not json" > .orchestra/report.json ;;
-    esac' fake "$task" "${FAKE_MODEL:?}" "${FAKE_REPORT:-valid}" "${ORCHESTRA_KEY_ENV:-}" "$(printf %s "${FAKE_SECRET:-}" | sha256sum | cut -d" " -f1)")
+    esac
+    # FAKE_END=1: announce the end, then linger, so the progress follower exits before the run does (a race that
+    # once aborted runs under set -e).
+    if [ "$6" = 1 ]; then echo "{\"type\":\"agent_end\"}"; sleep 2; fi' fake "$task" "${FAKE_MODEL:?}" "${FAKE_REPORT:-valid}" "${ORCHESTRA_KEY_ENV:-}" "$(printf %s "${FAKE_SECRET:-}" | sha256sum | cut -d" " -f1)" "${FAKE_END:-0}")
 }
 # Event parsing is the real pi adapter's, so these tests cover it too.
 harness_models_used() { (. "$ORCHESTRA_TEST_ROOT/lib/harness/pi.sh"; harness_models_used "$1"); }
