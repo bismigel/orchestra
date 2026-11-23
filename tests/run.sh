@@ -102,6 +102,52 @@ main() {
   has "lint (ops): risk and rollback required" "L1 front matter missing: risk, rollback"
   ( cd "$lrepo" && "$root/bin/orchestra-task" lint --base HEAD O1 ) > "$tmp/out" 2>&1 && ok "lint (dev): no risk/rollback needed" || bad "lint (dev) wrongly needs risk/rollback"
 
+
+  # diff, prove, land: a bare remote, a task worktree, a gate and a spec proof line. No model involved.
+  ( set -e
+    local_r="$tmp/landing"; mkdir -p "$local_r"; cd "$local_r"
+    git init -q --bare remote.git
+    git clone -q remote.git repo 2>/dev/null; cd repo
+    git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init; git push -q origin HEAD:main 2>/dev/null
+    git fetch -q origin; git checkout -q -B main origin/main
+    mkdir -p docs/work/tasks
+    printf -- '---\nid: P1\ntitle: Add greeting\n---\n## Acceptance\n- proof: `test -f greet.txt`\n' > docs/work/tasks/P1-greet.md
+    git add -A; git -c user.email=t@t -c user.name=t commit -qm spec; git push -q origin HEAD:main
+    git worktree add -q -b task/P1 ../repo-worktrees/P1 origin/main
+    cd ../repo-worktrees/P1; echo hi > greet.txt; echo gen > view_templ.go
+    git -c user.email=t@t -c user.name=t commit -qm "claim P1" --allow-empty
+  ) >/dev/null 2>&1 && ok "landing fixture" || bad "landing fixture"
+  local LR="$tmp/landing/repo" LW="$tmp/landing/repo-worktrees/P1"
+  export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+  ( cd "$LR" && ORCHESTRA_BASE=origin/main "$W" diff P1 ) > "$tmp/out" 2>&1
+  has "diff shows the changed file" "greet.txt"
+  has "diff lists generated files in the stat" "view_templ.go"
+  if grep -q '^+gen$' "$tmp/out"; then bad "diff hides generated content"; else ok "diff hides generated content"; fi
+  expect_rc 1 "prove fails when the gate fails" env -C "$LR" ORCHESTRA_GATE=false "$W" prove P1
+  has "a failing check shows FAIL" "FAIL"
+  expect_rc 0 "prove passes" env -C "$LR" ORCHESTRA_GATE=true "$W" prove P1
+  has "the spec proof line runs" "test -f greet.txt"
+  expect_rc 0 "an unchanged tree reuses its proof" env -C "$LR" ORCHESTRA_GATE=true "$W" prove P1
+  has "proven checks are not run again" "(proven)"
+  echo more > "$LW/greet.txt"
+  expect_rc 0 "a change invalidates the proof" env -C "$LR" ORCHESTRA_GATE=true "$W" prove P1
+  hasnt "a changed tree is not reported as proven" "(proven)  test -f"
+  expect_rc 0 "manual proof" env -C "$LR" "$W" prove P1 --manual "looked at it in a browser"
+  expect_rc 2 "land refuses when a check fails" env -C "$LR" ORCHESTRA_GATE=false "$W" land P1
+  expect_rc 0 "land" env -C "$LR" ORCHESTRA_GATE=true "$W" land P1
+  git -C "$tmp/landing/remote.git" log -1 --format=%B main > "$tmp/out"
+  has "landed as '<task>: <title>'" "P1: Add greeting"
+  has "the commit carries a Proof trailer" "Proof: pass"
+  has "the commit carries the manual proof" "Proof: manual: looked at it in a browser"
+  if [ "$(git -C "$tmp/landing/remote.git" rev-list --count main)" = 3 ]; then ok "land squashes the claim commit away"; else bad "land did not squash (commits: $(git -C "$tmp/landing/remote.git" rev-list --count main))"; fi
+  # A message written on the branch survives the squash (claim commits do not).
+  ( cd "$LR" && git fetch -q origin && git worktree add -q -b task/P2 ../repo-worktrees/P2 origin/main && cd ../repo-worktrees/P2 &&
+    git commit -qm "claim P2" --allow-empty && echo x > two.txt && git add -A && git commit -qm "P2: keep my words" -m "Body line." ) >/dev/null 2>&1
+  expect_rc 0 "land keeps a written message" env -C "$LR" ORCHESTRA_GATE=true "$W" land P2
+  git -C "$tmp/landing/remote.git" log -1 --format=%B main > "$tmp/out"
+  has "the written subject is kept" "P2: keep my words"
+  has "the written body is kept" "Body line."
+  hasnt "no squash placeholder in the message" "squash P2"
   echo "---"; echo "$pass passed, $fail failed"
   [ "$fail" = 0 ]
 }

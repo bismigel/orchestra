@@ -17,9 +17,10 @@ in `docs/orchestrator-guide.md` next to this skill's source (`orchestra` reposit
    `orchestra-worker run <id> --spec <file>`; feedback rounds: `orchestra-worker run <id> --feedback <file>`.
    Keep 2-3 workers at most. Model, key and sandbox come from orchestra's config; never pass keys on the command line.
 4. **Review** every run: exit code (3 = disallowed model, discard; 4 = no valid report), the report's
-   `open_questions` (decide them), the full diff, the checks run by you, and **probes** with your own inputs on
+   `open_questions` (decide them), the full diff (`orchestra-worker diff <id>`), the checks run by you (`orchestra-worker prove <id>`;
+   a report is a claim, a proof is evidence), and **probes** with your own inputs on
    anything risky. The report is a claim, not proof.
 5. **Feedback** as a table of failing cases (input, actual, required) plus the rule; after ~3 rounds finish it
    yourself. Small fixes you have already decided: just make them.
-6. **Land**: workers cannot commit. Commit from the worktree, run the full gate, merge under the repo's rules, and
-   tell the user what landed, the rounds and the cost (`orchestra-worker summary <id>`).
+6. **Land**: `orchestra-worker land <id>` (rebase, squash, prove the exact code, push with `Proof:` trailers; it
+   refuses on any failing check). Tell the user what landed, the rounds and the cost (`orchestra-worker summary <id>`).

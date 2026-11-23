@@ -27,8 +27,10 @@ Exit codes: `0` ran and reported · `3` a disallowed model answered: discard the
 
 Then, in this order:
 1. Read `.orchestra/report.json`, especially `open_questions` and `out_of_scope_needed`: decide each open question.
-2. Read the whole diff (`git -C <worktree> diff`). Check it stays inside the task's paths.
-3. Run the checks yourself. Do not reuse the worker's results.
+2. Read the whole diff: `orchestra-worker diff <task>` (generated files appear only in the stat). Check it stays
+   inside the task's paths.
+3. Run the checks yourself: `orchestra-worker prove <task>`. Do not reuse the worker's results: its report is a
+   claim, a proof is evidence ([docs/proofs.md](proofs.md)).
 4. **Probe.** For anything touching data, privacy, security or money, write a throwaway test with your own inputs,
    especially ones the worker's tests don't cover, and look at the actual outputs. This is where bugs are found.
 5. Decide: land it, fix a small decided issue yourself, or send feedback.
@@ -39,11 +41,12 @@ that makes them fail, and the test rows to add. Keep the rules you set non-negot
 protect data. After about three rounds, take the task over.
 
 ## Landing
-Workers cannot commit. Commit from the worktree yourself, run the full gate, and merge under your repository's rules.
-Record the task's cost from `orchestra-worker summary` if you track it.
+Workers cannot commit. `orchestra-worker land <task>` does it for you: it commits what is left, rebases onto
+`ORCHESTRA_BASE`, squashes (claim and wip commits are dropped; a message written on the branch is kept), proves the
+result, and pushes with `ORCHESTRA_PUSH_CMD` only if every check passes, adding `Proof:` trailers. Record the task's
+cost from `orchestra-worker summary` if you track it.
 
-**Squash by rebasing, never by resetting.** A worktree is a snapshot of when the task started. If you squash with
-`git reset --soft origin/main` from it, every file that changed on `main` since then is silently reverted in your
-commit. Instead: commit in the worktree, `git rebase origin/main`, then squash (`git rebase -i` or
-`git merge --squash` onto a fresh branch from `origin/main`), and check `git diff --stat origin/main` lists only the
-task's paths before pushing. (This happened in the first production pilot: a squash reverted unrelated docs.)
+**Squash by rebasing, never by resetting a stale worktree.** A worktree is a snapshot of when the task started; a
+`git reset --soft origin/main` from it silently reverts every file that changed on `main` since. `land` rebases
+first, then squashes onto the base it just rebased on, which is safe. (This happened in the first production pilot
+before `land` existed: a squash reverted unrelated docs.)

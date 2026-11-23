@@ -84,7 +84,9 @@ See [docs/ops-guide.md](docs/ops-guide.md).
 3. **Launch**: `orchestra-worker run <id> --spec spec.md`. Run it in the background; 2-3 workers at a time.
 4. **Review**: exit code (`3` = a disallowed model answered, `4` = no valid report), the report's open questions,
    the diff, your own run of the checks, and probes with your own inputs.
-5. **Feedback** (`--feedback review.md`, same session) or **land** it yourself: workers cannot commit.
+5. **Feedback** (`--feedback review.md`, same session), or prove and land: `orchestra-worker diff <id>` (no
+   generated noise), `orchestra-worker prove <id>`, `orchestra-worker land <id>`. A worker's report is a claim; a
+   proof is a check orchestra ran itself on the exact code ([docs/proofs.md](docs/proofs.md)).
 
 The full loop is in [docs/orchestrator-guide.md](docs/orchestrator-guide.md); the reasoning in
 [docs/design.md](docs/design.md); the threat model and known gaps in [docs/security.md](docs/security.md).
@@ -97,7 +99,7 @@ The full loop is in [docs/orchestrator-guide.md](docs/orchestrator-guide.md); th
 Other orchestrators: reference `docs/orchestrator-guide.md` from their `AGENTS.md`.
 
 ## Status
-Early and evolving: the interface (`run`, `summary`, the report schema, the config keys) is meant to stay stable
+Early and evolving: the interface (`run`, `summary`, `diff`, `prove`, `land`, the report schema, the config keys) is meant to stay stable
 while the inside improves. Planned: an egress-allowlisting proxy (issue #2) for the sandbox, more harness adapters, macOS
 sandboxing, and an optional long-running worker service for unattended queues. Ideas and adapters are welcome.
 
