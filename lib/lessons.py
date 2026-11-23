@@ -15,7 +15,7 @@ ELLIPSIS = "\u2026"  # `…`: one character, so a cut item is exactly LIMIT char
 
 def collapse(item):
     """One line, no runs of whitespace, cut to LIMIT characters."""
-    text = " ".join(str(item).split())
+    text = " ".join(str(item).split()).rstrip(".")   # the line adds its own full stop
     if len(text) > LIMIT:
         text = text[:LIMIT - 1] + ELLIPSIS
     return text
