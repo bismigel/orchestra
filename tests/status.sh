@@ -65,6 +65,13 @@ print("ok   --json empty")
 PY
 [ $? = 0 ] && pass=$((pass+1)) || bad "--json empty"
 
+# --prune removes the stale file and leaves the live one alone.
+(cd "$REPO" && "$WORKER" status --prune >/dev/null 2>&1)
+[ -f "$TMP/repo-worktrees/T01/.orchestra/run.json" ] && ok "--prune keeps a live run" || bad "--prune removed a live run"
+[ -f "$TMP/repo-worktrees/T02/.orchestra/run.json" ] && bad "--prune left a stale file" || ok "--prune removes a stale file"
+out=$(cd "$REPO" && "$WORKER" status 2>/dev/null)
+grep -q "T02" <<<"$out" && bad "pruned run still listed" || ok "pruned run no longer listed"
+
 kill "$LIVE" 2>/dev/null || true
 printf 'status: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

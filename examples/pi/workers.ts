@@ -105,7 +105,18 @@ export default function (pi) {
       for (const r of running)
         ctx.ui.notify(`${r.task} running ${dur(r.elapsed_seconds)} · run ${r.run} · ${r.model}`, "info");
       for (const r of stale)
-        ctx.ui.notify(`${r.task} STALE (pid ${r.pid} gone) — re-run it or delete ${r.worktree}/.orchestra/run.json`, "warning");
+        ctx.ui.notify(`${r.task} STALE (pid ${r.pid} gone) — /workers clean removes these`, "warning");
+    },
+  });
+
+  pi.registerCommand("workers clean", {
+    description: "Remove stale orchestra run state files (runs whose process is gone)",
+    handler: async (_args, ctx) => {
+      execFile(BIN, ["status", "--prune"], { cwd: process.cwd(), timeout: 5000 }, async (err, _out, stderr) => {
+        await refresh(ctx);
+        if (err) return ctx.ui.notify("orchestra-worker status --prune failed", "error");
+        ctx.ui.notify(String(stderr).trim() || "nothing to prune", "info");
+      });
     },
   });
 }

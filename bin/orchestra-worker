@@ -6,7 +6,8 @@
 #   orchestra-worker diff <task-id> [--worktree <dir>] [--stat]     review diff, generated files only in the stat
 #   orchestra-worker prove <task-id> [--worktree <dir>] [--manual "what you checked"]
 #   orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]
-#   orchestra-worker status [--json] [--worktree <dir>]    what is running now, and what died silently
+#   orchestra-worker status [--json] [--prune] [--worktree <dir>]
+#                                             what is running now, and what died silently (--prune clears those)
 #
 # prove runs the landing gate and the task's `proof:` checks in the worktree (outside the sandbox) and records one
 # line per check, bound to a hash of the exact code. land rebases, squashes, proves that code and pushes, with
@@ -231,9 +232,10 @@ PYSTATE
 # point: a killed or crashed run leaves the file behind, and reporting it as "running" is how an orchestrator waits
 # forever on nothing.
 cmd_status() {
-  local here=$1; shift; local wt="" json=0
+  local here=$1; shift; local wt="" json=0 prune=0
   while [ $# -gt 0 ]; do case "$1" in
     --json) json=1; shift ;;
+    --prune) prune=1; shift ;;
     --worktree) wt=${2:?}; shift 2 ;;
     -*) die "unknown option $1" ;;
     *) die "status takes no positional arguments" ;;
@@ -250,9 +252,11 @@ cmd_status() {
     shopt -s nullglob; files=("$base"/*/.orchestra/run.json); shopt -u nullglob
   fi
 
-  python3 -I - "$json" "${files[@]}" <<'PYSTATUS'
+  if [ "$prune" = 1 ]; then json=0; fi   # --prune acts, it does not print JSON
+  python3 -I - "$json" "$prune" "${files[@]}" <<'PYSTATUS'
 import json, os, sys, time
 as_json = sys.argv[1] == "1"
+prune = sys.argv[2] == "1"
 now = int(time.time())
 rows = []
 for f in sys.argv[2:]:
@@ -279,8 +283,25 @@ for f in sys.argv[2:]:
         "worktree": st.get("worktree") or f.rsplit("/.orchestra/", 1)[0],
         "started_at": st.get("started_at", ""),
         "pid": pid,
+        "_file": f,
     })
 rows.sort(key=lambda r: (r["state"] != "running", r["task"]))
+
+for r in rows:
+    r["state_file"] = r.pop("_file")
+
+if prune:
+    removed = 0
+    for r in rows:
+        if r["state"] == "stale":
+            try:
+                os.remove(r["state_file"])
+                removed += 1
+            except OSError:
+                pass
+    sys.stderr.write("pruned %d stale run state file(s)\n" % removed)
+    raise SystemExit(0)
+
 
 if as_json:
     print(json.dumps({"runs": rows, "running": sum(1 for r in rows if r["state"] == "running")}, indent=1))
