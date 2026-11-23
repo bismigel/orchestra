@@ -8,6 +8,12 @@ import json
 import sys
 
 
+
+def short(text, limit=110):
+    """One line, at most limit characters: the full text stays in scout.json."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
 def invalid(reason):
     print(f"scout_view: invalid scout report: {reason}", file=sys.stderr)
     return 1
@@ -72,9 +78,9 @@ def main(argv):
         for e in not_found:
             line = f"  {e.get('spec_says', '')}"
             if e.get("actual"):
-                line += f" → {e['actual']}"
+                line += f" → {short(e['actual'])}"
             if e.get("note"):
-                line += f" ({e['note']})"
+                line += f" ({short(e['note'])})"
             print(line)
 
     files = entry_list(report.get("files_to_change") or [])
@@ -90,7 +96,7 @@ def main(argv):
     if patterns:
         print("patterns")
         for e in patterns:
-            print(f"  {e.get('path', '')}: {e.get('what', '')}")
+            print(f"  {e.get('path', '')}: {short(e.get('what', ''))}")
 
     broken = [e for e in entry_list(report.get("commands") or []) if e.get("runs") is False]
     if broken:
@@ -105,7 +111,7 @@ def main(argv):
     if isinstance(size, dict):
         line = f"{'size':<11}~{size.get('files', 0)} files, ~{size.get('lines', 0)} lines"
         if size.get("split"):
-            line += f" · split: {size['split']}"
+            line += f" · split: {short(size['split'])}"
         print(line)
 
     undecided = [str(item) for item in (report.get("undecided") or [])]
@@ -127,11 +133,11 @@ def main(argv):
         seen.add(path_)
         line = f"- `{path_}`"
         if is_test:
-            line += f": asserts {why}" if why else ": asserts"
+            line += f": asserts {short(why)}" if why else ": asserts"
             if test:
                 line += f" ({test})"
         elif why:
-            line += f": {why}"
+            line += f": {short(why)}"
         lines.append(line)
     if lines:
         print("")
