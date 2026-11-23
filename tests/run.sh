@@ -168,6 +168,9 @@ main() {
   expect_rc 0 "land --pr again updates the PR branch" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_CMD='true' "$W" land P3 --pr
   if git -C "$tmp/landing/remote.git" show orchestra/P3:three.txt | grep -q more; then ok "the PR branch has the new commit"; else bad "PR branch not updated"; fi
   expect_rc 2 "land --pr refuses the base as the PR branch" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_BRANCH=main "$W" land P3 --pr
+  has "it refuses for the right reason" "ORCHESTRA_PR_BRANCH must not be the base branch"
+  expect_rc 0 "a custom PR branch name is used exactly" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_CMD=none ORCHESTRA_PR_BRANCH='review/{task}' "$W" land P3 --pr
+  if git -C "$tmp/landing/remote.git" rev-parse -q --verify refs/heads/review/P3 >/dev/null; then ok "pushed to review/P3"; else bad "custom PR branch not pushed as review/P3"; fi
   # A title is worker-influenced text: it must reach the PR command as data, never as code.
   ( cd "$tmp/landing/repo-worktrees/P3" && echo evil > evil.txt && git add -A && git commit -qm 'P3: $(touch PWNED) `touch PWNED2`' ) >/dev/null 2>&1
   expect_rc 0 "land --pr with a hostile title" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_MESSAGE_KEEP=1 ORCHESTRA_PR_CMD='echo "title={title}"' "$W" land P3 --pr

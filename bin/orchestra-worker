@@ -1066,9 +1066,9 @@ cmd_prove() {
 # open a pull request with ORCHESTRA_PR_CMD ({branch} {base} {title} {body} replaced; default: gh when installed).
 land_pr() {
   local wt=$1 task=$2 base=$3
-  local prb=${ORCHESTRA_PR_BRANCH:-orchestra/{task}}; prb=${prb//\{task\}/$task}
+  local prb=${ORCHESTRA_PR_BRANCH:-"orchestra/{task}"}; prb=${prb//\{task\}/$task}
   [ "$prb" != "$base" ] || die "ORCHESTRA_PR_BRANCH must not be the base branch"
-  local push=${ORCHESTRA_PR_PUSH_CMD:-git push --force-with-lease origin HEAD:refs/heads/{branch}}
+  local push=${ORCHESTRA_PR_PUSH_CMD:-"git push --force-with-lease origin HEAD:refs/heads/{branch}"}
   (cd "$wt" && bash -c "${push//\{branch\}/$prb}") >/dev/null 2>&1 || die "could not push $prb (ORCHESTRA_PR_PUSH_CMD)"
   local title body; title=$(git -C "$wt" log -1 --format=%s); body=$(mktemp)
   git -C "$wt" log -1 --format=%b > "$body"

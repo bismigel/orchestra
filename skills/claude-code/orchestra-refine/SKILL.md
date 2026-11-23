@@ -7,7 +7,8 @@ description: Make tasks ready for worker agents - run orchestra-task lint, then 
 
 Follow "refine" in the guide printed by `orchestra-worker guide planning`. For each task (`<id>`, a wave, or all):
 
-1. `orchestra-task lint <ids>`: fix every error it reports.
+1. `orchestra-task lint <ids>`: fix every error it reports, and every `L8 no proof: line` warning (without one,
+   `land` proves only the gate; `--strict` makes warnings fail).
    Then, for each task beyond a few files, `orchestra-worker scout <id> --spec <task file>`: a read-only worker
    checks the spec against the code (real paths, missed files and tests, broken commands, size). Read its view,
    paste what belongs into Touches, and decide anything it lists as undecided.

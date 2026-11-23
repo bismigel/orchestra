@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.0 (2026-11-23)
+Why: [proposals/0004](docs/proposals/0004-skill-gaps.md).
+- **Bug (0.6.0 and earlier): stopping `orchestra-worker` left the worker running** until its timeout. The worker is
+  now a supervised background job; SIGTERM and SIGINT stop it and clean up (exit 130).
+- **One run per task**: a run or scout on a task whose run is alive is refused (exit 2); stale state is cleared.
+- **`ORCHESTRA_MAX_COST`**: stops a run whose responses cost more (exit 5, `OVER BUDGET` on the card).
+- **`orchestra-worker doctor`**: checks config, model, harness, sandbox (and private network namespaces), the key
+  (length and fingerprint only), base, gate, dev environment, binds, budget and stale state.
+- **`clean` archives before it deletes**, to a ledger in the git directory; **`orchestra-worker history`** shows every
+  task's runs, cost and outcome, cleaned-up ones included, with the project total.
+- **`orchestra-worker lessons <id>`** drafts lessons-file lines from a run's spec gaps; `review` shows
+  `lessons N spec gap(s)` and its JSON gains `spec_gaps`. **Lint** warns when a task has no `proof:` line
+  (`--strict` fails on warnings).
+- **`land --pr`** (`ORCHESTRA_LAND=pr`) for protected bases: push the proven commit to `orchestra/<task>` and open a
+  pull request (`ORCHESTRA_PR_CMD`, default `gh`); placeholders expand as variables, so titles are data.
+- **`orchestra-worker guide <name>`** prints a guide's real path; skills use it instead of relative paths.
+  `tests/docs.sh` keeps docs and CLI in step.
+- **pi**: `examples/pi/orchestra.ts` (scout, run, status, review, prove, land tools; the model gets the end card and
+  the review digest, progress goes to the tool view) and `examples/pi/prompts/land.md`.
+- `--help` prints the whole header. Offline suites: 15, 500+ checks.
+
 ## 0.6.0 (2026-11-23)
 - **Egress allowlist** (`ORCHESTRA_EGRESS_ALLOW`, issue #2): the sandbox gets a private network (loopback only, no
   DNS) whose only way out is orchestra's proxy outside the sandbox, which allows `CONNECT` to listed hosts only and

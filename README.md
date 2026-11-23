@@ -99,8 +99,10 @@ rotation) and `ops-incident`. They are installed only with `./install.sh --ops`.
 Beyond the loop: `orchestra-worker history` lists every task's runs, cost and outcome (cleaned-up worktrees
 included); `orchestra-worker lessons <id>` drafts lessons-file lines from the spec gaps a review found;
 `orchestra-worker guide <name>` prints a guide's path (`--print` prints its text, and
-`orchestra-worker guide templates` prints the template directory). `orchestra-worker doctor` is the setup check
-(sandbox, harness, key, model, base, gate; not implemented yet).
+`orchestra-worker guide templates` prints the template directory). `orchestra-worker doctor` checks the setup
+before a run does (sandbox, harness, key by fingerprint only, model, base, gate, dev environment, budget).
+`ORCHESTRA_MAX_COST=0.50` stops a run that spends more than that (exit 5), and `orchestra-worker land <id> --pr`
+opens a pull request instead of pushing, for protected branches.
 
 ## Seeing what is happening
 ```
