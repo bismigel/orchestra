@@ -37,7 +37,8 @@ When done, or stuck after a genuine attempt, write `.orchestra/report.json` (val
   "checks": [{"command": "...", "result": "pass | fail", "notes": "..."}],
   "rendered_diff": ["overlay: what changes in the rendered output (kinds, names, fields)"],
   "risk_notes": ["anything that could break on apply, and what depends on it"],
-  "open_questions": ["judgment calls and anything the orchestrator must decide"],
+  "open_questions": ["blocking: judgment calls you did not make"],
+  "assumptions": ["small, easy-to-change calls you made (never sizes, allow-lists, storage, access): what and where"],
   "out_of_scope_needed": ["changes outside the spec you needed but did not make"]
 }
 ```

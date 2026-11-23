@@ -30,7 +30,10 @@
         "properties": { "item": { "type": "string" }, "met": { "type": "boolean" }, "evidence": { "type": "string" } }
       }
     },
-    "open_questions": { "type": "array", "items": { "type": "string" } },
+    "open_questions": { "description": "Blocking judgment calls the worker did not make.", "type": "array", "items": { "type": "string" } },
+    "assumptions": { "description": "Small, low-risk calls the worker made where the spec was silent: what and where to change it.", "type": "array", "items": { "type": "string" } },
+    "rendered_diff": { "type": "array", "items": { "type": "string" } },
+    "risk_notes": { "type": "array", "items": { "type": "string" } },
     "out_of_scope_needed": { "type": "array", "items": { "type": "string" } }
   }
 }

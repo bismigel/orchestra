@@ -13,6 +13,12 @@ judgment call they do not settle (what data to keep or remove, a privacy or secu
 shape, pricing, product behaviour), do not guess: implement what is settled, then stop and list the open call under
 `open_questions` in your report. Never weaken a privacy or security protection to make something else pass.
 
+Two kinds of note, kept apart so the orchestrator can act fast:
+- `open_questions`: **blocking** calls you did not make (left unimplemented, or the work depends on the answer).
+- `assumptions`: small calls you did make because the spec was silent and the choice was low-risk and easy to change
+  (a name, a label, a format, which of two equivalent files). One line each: what you chose and where to change it.
+  Anything about data, privacy, security, money, a contract or a schema is never an assumption: it is blocking.
+
 ## Rules
 - Work only inside this worktree, and only on what the spec asks. If the spec limits which paths you may change,
   stay inside them; if the task cannot be done that way, stop and say so in the report.
@@ -36,7 +42,8 @@ When done, or stuck after a genuine attempt, write `.orchestra/report.json` (val
   "files_changed": ["path"],
   "checks": [{"command": "...", "result": "pass | fail", "notes": "..."}],
   "acceptance": [{"item": "acceptance item from the spec", "met": true, "evidence": "test name or output"}],
-  "open_questions": ["judgment calls and anything else the orchestrator must decide"],
+  "open_questions": ["blocking: judgment calls you did not make"],
+  "assumptions": ["small calls you made: what you chose, and where to change it"],
   "out_of_scope_needed": ["changes outside the task you needed but did not make"]
 }
 ```

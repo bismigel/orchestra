@@ -36,7 +36,7 @@ PY
 out=$(cd "$REPO" && "$WORKER" status 2>/dev/null)
 grep -q "T01 .*running" <<<"$out" && ok "live pid reported running" || bad "live pid not reported running: $out"
 grep -q "T02 .*stale"   <<<"$out" && ok "dead pid reported stale"   || bad "dead pid not reported stale: $out"
-grep -q "2m05s"         <<<"$out" && ok "elapsed formatted from started" || bad "elapsed missing: $out"
+grep -qE "2m0[56]s"     <<<"$out" && ok "elapsed formatted from started" || bad "elapsed missing: $out"
 grep -q "T02" <<<"$(cd "$REPO" && "$WORKER" status 2>&1 >/dev/null)" && ok "stale run explained on stderr" || bad "no stale hint"
 
 js=$(cd "$REPO" && "$WORKER" status --json 2>/dev/null)

@@ -12,6 +12,6 @@ jobs:
       - name: Allow unprivileged user namespaces (Ubuntu 24.04 restricts them via AppArmor)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: shellcheck
-        run: shellcheck -x -S warning bin/orchestra-worker bin/orchestra-task lib/harness/*.sh install.sh tests/run.sh tests/fixtures/*.sh
-      - name: tests
-        run: tests/run.sh
+        run: shellcheck -x -S warning bin/orchestra-worker bin/orchestra-task lib/harness/*.sh install.sh tests/*.sh tests/fixtures/*.sh
+      - name: tests (every suite)
+        run: tests/all.sh

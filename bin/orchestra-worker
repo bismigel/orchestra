@@ -8,6 +8,12 @@
 #   orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]
 #   orchestra-worker status [--json] [--prune] [--worktree <dir>]
 #                                             what is running now, and what died silently (--prune clears those)
+#   orchestra-worker watch [<task-id>]        live view of running workers: what each one is doing right now
+#   orchestra-worker review <task-id> [--json]  one-screen digest of a finished run: questions, paths, proofs, diff
+#   orchestra-worker scout <task-id> --spec <file>
+#                                             read-only worker maps a draft spec to the code (where things live)
+#   orchestra-worker clean [--yes] [--include-squashed]
+#                                             remove worktrees of landed tasks (lists them without --yes)
 #
 # prove runs the landing gate and the task's `proof:` checks in the worktree (outside the sandbox) and records one
 # line per check, bound to a hash of the exact code. land rebases, squashes, proves that code and pushes, with
@@ -30,8 +36,12 @@ main() {
     prove) cmd_prove "$here" "$@" ;;
     land) cmd_land "$here" "$@" ;;
     status|ps) cmd_status "$here" "$@" ;;
-    -h|--help|help|"") sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
-    *) die "unknown command: $cmd (try: run, summary, diff, prove, land)" ;;
+    watch) cmd_watch "$here" "$@" ;;
+    review) cmd_review "$here" "$@" ;;
+    scout) cmd_scout "$here" "$@" ;;
+    clean) cmd_clean "$here" "$@" ;;
+    -h|--help|help|"") sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
+    *) die "unknown command: $cmd (try: run, status, watch, review, scout, prove, land, clean)" ;;
   esac
 }
 
@@ -186,21 +196,30 @@ print(t)' "$tpl")
   fi
 
   log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, profile $ORCHESTRA_PROFILE, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT"
-  write_run_state "$state" "$task" "$n" "$wt" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS"
+  local progress; progress=$(progress_script "$harness_file")
+  write_run_state "$state" "$task" "$n" "$wt" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress"
   # The state file outlives this process on every exit path, so it is removed on all of them: normal, timeout
   # (rc 124) and SIGINT. The path is baked into the trap: the trap runs after this function's locals are out of
   # scope, where "$state" would be unbound (set -u) and would abort the run.
   # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
   trap "rm -f $(printf '%q' "$state/run.json")" EXIT
-  local rc=0
+  local rc=0 t0=$SECONDS follower=""
+  : > "$out.jsonl"
+  # Live progress: one line per tool call on stderr, so a background run's output shows what the worker is doing.
+  # It only reads the event log; it never talks to the worker. ORCHESTRA_PROGRESS=0 turns it off.
+  if [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] && [ -n "$progress" ]; then
+    python3 -I "$progress" follow "$out.jsonl" --task "$task" --start "$(date +%s)" >&2 & follower=$!
+  fi
   # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
   set +e
   timeout --kill-after=30s "$ORCHESTRA_TIMEOUT" "${sandbox[@]}" "${hargv[@]}" \
-    9< <(printf '%s' "$key") < /dev/null > "$out.jsonl" 2> "$out.err"   # stdin closed: headless harnesses (pi -p)
+    9< <(printf '%s' "$key") < /dev/null >> "$out.jsonl" 2> "$out.err"  # stdin closed: headless harnesses (pi -p)
                                                                          # read piped stdin and would wait forever
   rc=$?
   set -e
   unset key
+  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null; wait "$follower" 2>/dev/null || true; fi
+  local secs=$((SECONDS - t0))
 
   local used; used=$(harness_models_used "$out.jsonl")
   local m bad=""
@@ -210,21 +229,33 @@ print(t)' "$tpl")
   if [ -n "$bad" ]; then log "MODEL POLICY: model(s) not allowed answered:$bad"; rc=3
   elif ! check_report "$state/report.json" "$task"; then [ "$rc" = 0 ] && rc=4
   fi
-  print_summary "$task" "$state" "$n" "$rc"
-  git -C "$wt" status --short | grep -v '^?? \.orchestra/' | head -40 >&2 || true
+  # The outcome outlives the run (run.json does not), so `review` can say how the run ended.
+  python3 -I -c 'import json,sys,time; json.dump({"exit":int(sys.argv[2]),"secs":int(sys.argv[3]),"finished_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())},open(sys.argv[1],"w"))' \
+    "$out.result.json" "$rc" "$secs"
+  print_summary "$task" "$state" "$n" "$rc" "$secs"
+  git -C "$wt" status --short | grep -v '^?? \.orchestra/' | head -15 >&2 || true
   return "$rc"
+}
+
+# progress_script <harness-file>: the harness's optional progress reader (<harness>_progress.py next to the
+# adapter). Empty when the harness has none: progress is a convenience, never required.
+progress_script() {
+  local f="${1%.sh}_progress.py"
+  [ -f "$f" ] && echo "$f"
+  return 0
 }
 
 # write_run_state records what is running, so `status` (and an editor widget) can see it without parsing logs.
 # Written by the orchestrator's shell, never by the worker: the sandbox has no write access to this file.
 write_run_state() {
-  local state=$1 task=$2 n=$3 wt=$4 model=$5 harness=$6
-  python3 -I - "$state/run.json" "$task" "$$" "$n" "$wt" "$model" "$harness" "${ORCHESTRA_PROFILE:-dev}" <<'PYSTATE'
+  local state=$1 task=$2 n=$3 wt=$4 model=$5 harness=$6 events=${7:-} progress=${8:-} kind=${9:-run}
+  python3 -I - "$state/run.json" "$task" "$$" "$n" "$wt" "$model" "$harness" "${ORCHESTRA_PROFILE:-dev}" \
+    "$events" "$progress" "$kind" <<'PYSTATE'
 import json, sys, time
-path, task, pid, n, wt, model, harness, profile = sys.argv[1:]
+path, task, pid, n, wt, model, harness, profile, events, progress, kind = sys.argv[1:]
 json.dump({"task": task, "pid": int(pid), "run": int(n), "worktree": wt, "model": model,
-           "harness": harness, "profile": profile, "started": int(time.time()),
-           "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+           "harness": harness, "profile": profile, "kind": kind, "events": events, "progress": progress,
+           "started": int(time.time()), "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
           open(path, "w"), indent=1)
 PYSTATE
 }
@@ -255,12 +286,12 @@ cmd_status() {
 
   if [ "$prune" = 1 ]; then json=0; fi   # --prune acts, it does not print JSON
   python3 -I - "$json" "$prune" "${files[@]}" <<'PYSTATUS'
-import json, os, sys, time
+import json, os, subprocess, sys, time
 as_json = sys.argv[1] == "1"
 prune = sys.argv[2] == "1"
 now = int(time.time())
 rows = []
-for f in sys.argv[2:]:
+for f in sys.argv[3:]:
     try:
         st = json.load(open(f))
     except (OSError, ValueError):
@@ -284,7 +315,24 @@ for f in sys.argv[2:]:
         "worktree": st.get("worktree") or f.rsplit("/.orchestra/", 1)[0],
         "started_at": st.get("started_at", ""),
         "pid": pid,
+        "kind": st.get("kind", "run"),
         "_file": f,
+    })
+    # Live progress from the harness's reader, when it has one: tool calls, cost so far, the last action.
+    prog, ev = st.get("progress") or "", st.get("events") or ""
+    snap = {}
+    if alive and prog and ev and os.path.isfile(prog) and os.path.isfile(ev):
+        try:
+            out = subprocess.run([sys.executable, "-I", prog, "snapshot", ev], capture_output=True, text=True, timeout=5)
+            snap = json.loads(out.stdout) if out.returncode == 0 else {}
+        except (OSError, ValueError, subprocess.SubprocessError):
+            snap = {}
+    rows[-1].update({
+        "tool_calls": snap.get("tool_calls"),
+        "cost": snap.get("cost"),
+        "last_action": snap.get("last_action", ""),
+        "quiet_seconds": max(0, now - int(snap["last_activity"])) if snap.get("last_activity") else None,
+        "files_touched": snap.get("files_touched", []),
     })
 rows.sort(key=lambda r: (r["state"] != "running", r["task"]))
 
@@ -318,10 +366,19 @@ def dur(s):
     if m: return "%dm%02ds" % (m, s)
     return "%ds" % s
 
-print("%-6s %-8s %-9s %-4s %-22s %s" % ("TASK", "STATE", "ELAPSED", "RUN", "MODEL", "WORKTREE"))
+print("%-8s %-8s %-8s %-4s %5s %7s  %s" % ("TASK", "STATE", "ELAPSED", "RUN", "TOOLS", "COST", "NOW"))
 for r in rows:
-    print("%-6s %-8s %-9s %-4s %-22s %s" % (r["task"], r["state"], dur(r["elapsed_seconds"]),
-          r["run"] or "", r["model"][:22], r["worktree"]))
+    task = r["task"] + (" (scout)" if r.get("kind") == "scout" else "")
+    cost = "$%.3f" % r["cost"] if r.get("cost") is not None else "-"
+    tools = str(r["tool_calls"]) if r.get("tool_calls") is not None else "-"
+    now_s = r.get("last_action") or ""
+    q = r.get("quiet_seconds")
+    if r["state"] == "running" and q is not None and q >= 120:
+        now_s = "quiet %s · %s" % (dur(q), now_s)   # no event for a while: thinking, a long command, or stuck
+    if r["state"] == "stale":
+        now_s = "process gone"
+    print("%-8s %-8s %-8s %-4s %5s %7s  %s" % (task, r["state"], dur(r["elapsed_seconds"]), r["run"] or "",
+          tools, cost, now_s[:70]))
 stale = [r for r in rows if r["state"] == "stale"]
 if stale:
     sys.stderr.write("\n%d stale: the process is gone but its state file was not cleaned up.\n"
@@ -344,6 +401,7 @@ build_sandbox() {
   case "$ORCHESTRA_SANDBOX" in
     none)
       [ "${ORCHESTRA_ALLOW_UNSANDBOXED:-}" = 1 ] || die "ORCHESTRA_SANDBOX=none needs ORCHESTRA_ALLOW_UNSANDBOXED=1"
+      [ "${SCOUT:-}" = 1 ] && log "warning: ORCHESTRA_SANDBOX=none: the scout is NOT read-only without a sandbox"
       _sb=(env -C "$wt" HOME="$state/home" bash -c "$INNER" "$ORCHESTRA_KEY_ENV" "${devenv:-}")
       return ;;
     bwrap) command -v bwrap >/dev/null || die "bubblewrap (bwrap) not found; install it or see docs/security.md" ;;
@@ -356,7 +414,12 @@ build_sandbox() {
   for p in /usr /bin /sbin /lib /lib64 /lib32 /etc /nix /opt /run/current-system; do
     [ -e "$p" ] && _sb+=(--ro-bind "$p" "$p")
   done
-  _sb+=(--bind "$state/home" "$home" --bind "$wt" "$wt" --ro-bind "$common" "$common" --bind "$gitdir" "$gitdir")
+  if [ "${SCOUT:-}" = 1 ]; then
+    # Scout: the checkout and all of git read-only; writable are only its home and its own state directory.
+    _sb+=(--ro-bind "$wt" "$wt" --ro-bind "$common" "$common" --bind "$state" "$state" --bind "$state/home" "$home")
+  else
+    _sb+=(--bind "$state/home" "$home" --bind "$wt" "$wt" --ro-bind "$common" "$common" --bind "$gitdir" "$gitdir")
+  fi
   local pair src dst
   for pair in $ORCHESTRA_RO_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
     [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--ro-bind "$src" "$dst"); done
@@ -402,28 +465,42 @@ need = {"task": str, "status": str, "summary": str, "files_changed": list, "chec
 bad = [k for k, t in need.items() if not isinstance(r.get(k), t)]
 if bad: sys.exit(f"orchestra-worker: report missing or wrong type: {', '.join(bad)}")
 if r["status"] not in ("done", "partial", "blocked"): sys.exit("orchestra-worker: report status must be done, partial or blocked")
+for k in ("assumptions", "out_of_scope_needed"):
+    if k in r and not isinstance(r[k], list): sys.exit(f"orchestra-worker: report field {k} must be a list")
 if r["task"] != sys.argv[2]: sys.exit(f"orchestra-worker: report is for task {r['task']}, not {sys.argv[2]}")
 PY
 }
 
+# print_summary <task> <state> <run> <exit|-> [secs]: the card printed when a run ends (and by `summary`).
+# Blocking questions come first: they are what the orchestrator has to act on.
 print_summary() {
-  local task=$1 state=$2 n=$3 rc=$4
-  python3 -I - "$state" "$n" "$rc" <<'PY' >&2
-import json, os, sys, glob
-state, n, rc = sys.argv[1], sys.argv[2], sys.argv[3]
+  local task=$1 state=$2 n=$3 rc=$4 secs=${5:-}
+  python3 -I - "$task" "$state" "$n" "$rc" "$secs" <<'PY' >&2
+import json, sys, glob
+task, state, n, rc, secs = sys.argv[1:]
 def load(p):
     try: return json.load(open(p))
     except Exception: return {}
 run = load(f"{state}/runs/run-{n}.usage.json")
-total = {"cost": 0.0, "input": 0, "output": 0, "responses": 0}
-for p in glob.glob(f"{state}/runs/run-*.usage.json"):
-    u = load(p)
-    for k in total: total[k] += u.get(k, 0) or 0
+total = 0.0
+for p in glob.glob(f"{state}/runs/run-*.usage.json"): total += load(p).get("cost", 0) or 0
 rep = load(f"{state}/report.json")
-print(f"orchestra-worker: run {n} exit {rc} | this run: {run.get('responses',0)} responses, ${run.get('cost',0):.4f} | task total: ${total['cost']:.4f}")
+meaning = {"0": "ok", "3": "DISALLOWED MODEL: discard the run", "4": "NO VALID REPORT", "124": "TIMED OUT",
+           "-": ""}.get(rc, "harness failed: read the run's .err file")
+took = ""
+if secs:
+    m, s_ = divmod(int(secs), 60); took = f" · {m}m{s_:02d}s" if m else f" · {s_}s"
+print(f"── {task} · run {n} exit {rc}{' (' + meaning + ')' if meaning else ''}{took}"
+      f" · {run.get('responses', 0)} responses · ${run.get('cost', 0):.4f} (task total: ${total:.4f})")
 if rep:
-    print(f"  status: {rep.get('status')}\n  summary: {rep.get('summary')}")
-    for q in rep.get("open_questions", []): print(f"  open: {q}")
+    blocking = rep.get("open_questions") or []
+    assumed = rep.get("assumptions") or []
+    print(f"   status    {rep.get('status')}: {rep.get('summary')}")
+    print(f"   counts    {len(rep.get('files_changed') or [])} files · {len(blocking)} blocking · {len(assumed)} assumed"
+          f" · {len(rep.get('out_of_scope_needed') or [])} outside scope")
+    for q in blocking: print(f"   BLOCKING  {q}")
+    for q in assumed: print(f"   assumed   {q}")
+print(f"   next      orchestra-worker review {task}")
 PY
 }
 
@@ -437,6 +514,130 @@ cmd_summary() {
   shopt -s nullglob; local runs=("$wt"/.orchestra/runs/run-*.jsonl); shopt -u nullglob
   [ ${#runs[@]} -gt 0 ] || die "no runs for $task in $wt"
   print_summary "$task" "$wt/.orchestra" "${#runs[@]}" "-"
+}
+
+# ---- watching, reviewing, cleaning, scouting ---------------------------------------------------------------------
+
+# cmd_watch: the status table plus each running worker's last few actions, redrawn every 2s until nothing runs.
+# Read-only, like status. Ctrl-C leaves the view; the workers keep running.
+cmd_watch() {
+  local here=$1; shift; local only=${1:-} interval=${ORCHESTRA_WATCH_INTERVAL:-2}
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  local base; base="$(dirname "$repo")/$(basename "$repo")-worktrees"
+  local tty=0; [ -t 1 ] && tty=1
+  while :; do
+    local -a files=(); shopt -s nullglob
+    if [ -n "$only" ]; then files=("$base/$only/.orchestra/run.json" "$base/.scout/$only/run.json")
+    else files=("$base"/*/.orchestra/run.json "$base"/.scout/*/run.json); fi
+    shopt -u nullglob
+    local frame; frame=$(
+      echo "orchestra · $(date +%H:%M:%S) · Ctrl-C stops watching (workers keep running)"; echo
+      cmd_status "$here" 2>/dev/null
+      local f; for f in "${files[@]}"; do [ -f "$f" ] || continue
+        python3 -I "$here/lib/watch_tail.py" "$f" 6
+      done)
+    if [ "$tty" = 1 ]; then printf '\033[H\033[2J%s\n' "$frame"; else printf '%s\n\n' "$frame"; fi
+    grep -q ' running ' <<<"$frame" || { echo "no worker running"; return 0; }
+    sleep "$interval"
+  done
+}
+
+# cmd_review: everything the orchestrator reads first, on one screen (lib/review.py). No model, read-only.
+cmd_review() {
+  local here=$1; shift; local task="" wt="" json=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --worktree) wt=${2:?}; shift 2 ;;
+    --json) json=1; shift ;;
+    -*) die "unknown option $1" ;;
+    *) task=$1; shift ;;
+  esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker review <task-id> [--json] [--worktree <dir>]"
+  local repo state; task_setup "$task" "$wt"
+  local -a extra=(); [ "$json" = 1 ] && extra=(--json)
+  python3 -I "$here/lib/review.py" --task "$task" --worktree "$wt" --base "$ORCHESTRA_BASE" \
+    --spec "$(spec_file "$wt" "$task")" --generated "$ORCHESTRA_GENERATED" --checks "$(checks "$wt" "$task")" \
+    --tree "$(work_tree "$wt")" "${extra[@]}"
+}
+
+# cmd_clean: remove the worktrees of tasks that have landed (lib/clean.py decides which; it only lists without --yes).
+cmd_clean() {
+  local here=$1; shift
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
+  python3 -I "$here/lib/clean.py" --repo "$repo" --worktrees "$(dirname "$repo")/$(basename "$repo")-worktrees" \
+    --base "$ORCHESTRA_BASE" "$@"
+}
+
+# cmd_scout: a read-only worker reads a draft spec against the code and reports where things really live, what else
+# must change, which tests assert the behaviour, and whether the acceptance commands exist. It cannot change the
+# repository: the checkout and the git directory are mounted read-only, and its only writable place is its own home.
+# Output: <repo>-worktrees/.scout/<task>/scout.json (shape in prompts/scout.md), and a short view of it.
+cmd_scout() {
+  local here=$1; shift; local task="" spec=""
+  while [ $# -gt 0 ]; do case "$1" in --spec) spec=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
+  [ -n "$task" ] && [ -n "$spec" ] || die "usage: orchestra-worker scout <task-id> --spec <file>"
+  [[ $task =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
+  [ -f "$spec" ] || die "spec not found: $spec"
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  load_config "$repo"
+  local harness_file="$here/lib/harness/$ORCHESTRA_HARNESS.sh"
+  case "$ORCHESTRA_HARNESS" in */*) harness_file=$(realpath -m "$ORCHESTRA_HARNESS") ;; esac
+  [ -f "$harness_file" ] || die "unknown harness '$ORCHESTRA_HARNESS' (lib/harness/*.sh, or a path to a .sh file)"
+  # shellcheck disable=SC1090
+  . "$harness_file"
+  model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
+
+  local state; state="$(dirname "$repo")/$(basename "$repo")-worktrees/.scout/$task"
+  mkdir -p "$state/sessions" "$state/runs" "$state/home"
+  cp "$spec" "$state/home/spec.md"; rm -f "$state/home/scout.json" "$state/scout.json"
+  local common; common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
+  local devenv=""
+  if [ -n "$ORCHESTRA_DEVENV_CMD" ]; then
+    devenv="$state/devenv.sh"
+    (cd "$repo" && bash -c "$ORCHESTRA_DEVENV_CMD") > "$devenv" 2>/dev/null || die "ORCHESTRA_DEVENV_CMD failed"
+  fi
+  local prompt; prompt=$(TASK="$task" SPEC="/home/worker/spec.md" OUT="/home/worker/scout.json" REPO="$repo" python3 -I -c '
+import os,sys
+t=open(sys.argv[1]).read()
+for k in ("TASK","SPEC","OUT","REPO"): t=t.replace("{{"+k+"}}", os.environ[k])
+print(t)' "$here/prompts/scout.md")
+  shopt -s nullglob; local runs=("$state"/runs/run-*.jsonl); shopt -u nullglob
+  local n=$(( ${#runs[@]} + 1 )) out="$state/runs/run-$(( ${#runs[@]} + 1 ))"
+  local -a hargv; harness_argv hargv "scout-$task" "$state" "$prompt"
+  local -a sandbox; SCOUT=1 build_sandbox sandbox "$repo" "$common" "$common" "$state" "$devenv"
+  if [ "${ORCHESTRA_DRY_RUN:-}" = 1 ]; then printf '%q ' "${sandbox[@]}" "${hargv[@]:0:${#hargv[@]}-1}" "<prompt>"; echo; return 0; fi
+  local key=""
+  if [ -n "$ORCHESTRA_KEY_ENV" ]; then
+    if [ -n "$ORCHESTRA_KEY_CMD" ]; then key=$(bash -c "$ORCHESTRA_KEY_CMD") || die "ORCHESTRA_KEY_CMD failed"
+    else key=${!ORCHESTRA_KEY_ENV:-}; fi
+    [ -n "$key" ] || die "no API key: set ORCHESTRA_KEY_CMD or export $ORCHESTRA_KEY_ENV"
+  fi
+  log "scout $task: read-only, model $ORCHESTRA_MODEL, timeout ${ORCHESTRA_SCOUT_TIMEOUT:-15m}"
+  local progress; progress=$(progress_script "$harness_file")
+  write_run_state "$state" "$task" "$n" "$repo" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress" scout
+  # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
+  trap "rm -f $(printf '%q' "$state/run.json")" EXIT
+  local rc=0 follower=""
+  : > "$out.jsonl"
+  if [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] && [ -n "$progress" ]; then
+    python3 -I "$progress" follow "$out.jsonl" --task "scout:$task" --start "$(date +%s)" >&2 & follower=$!
+  fi
+  set +e
+  timeout --kill-after=30s "${ORCHESTRA_SCOUT_TIMEOUT:-15m}" "${sandbox[@]}" "${hargv[@]}" \
+    9< <(printf '%s' "$key") < /dev/null >> "$out.jsonl" 2> "$out.err"
+  rc=$?
+  set -e
+  unset key
+  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null; wait "$follower" 2>/dev/null || true; fi
+  local used m bad=""; used=$(harness_models_used "$out.jsonl")
+  for m in $used; do model_allowed "$m" || bad="$bad $m"; done
+  harness_usage "$out.jsonl" > "$out.usage.json" || echo '{}' > "$out.usage.json"
+  [ -z "$bad" ] || { log "MODEL POLICY: model(s) not allowed answered:$bad"; return 3; }
+  [ -s "$state/home/scout.json" ] || { log "scout wrote no scout.json (exit $rc; see $out.err)"; return 4; }
+  cp "$state/home/scout.json" "$state/scout.json"
+  python3 -I "$here/lib/scout_view.py" "$state/scout.json" "$task" "$out.usage.json" || return 4
+  echo "full scout report: $state/scout.json"
+  return "$rc"
 }
 
 # ---- review and landing: diff, prove, land (no model involved) ----------------------------------------------------

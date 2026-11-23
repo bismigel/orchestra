@@ -25,3 +25,13 @@ The command runs inside the sandbox with the worktree as the working directory a
 
 Test it with `orchestra-worker run demo --spec examples/hello/spec.md --dry-run`, then a real run on the example task,
 and add a fixture-based test of `harness_models_used` and `harness_usage` under `tests/`.
+
+## Optional: live progress
+Put a reader next to the adapter, `lib/harness/<name>_progress.py`, and `run`, `scout`, `status` and `watch` use it to
+show what a worker is doing. It reads the event log only and offers three commands (see `pi_progress.py`):
+- `follow <events> --task T --start EPOCH`: print one line per tool call as the log grows, a quiet line after a minute
+  without one, and a done line on SIGTERM or when the run ends.
+- `snapshot <events>`: one JSON object: `tool_calls`, `turns`, `responses`, `cost`, `last_action`, `last_activity`,
+  `files_touched`.
+- `tail <events> --lines N`: the last N tool calls.
+Without one, everything works the same, minus the live lines.
