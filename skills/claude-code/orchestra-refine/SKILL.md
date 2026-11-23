@@ -5,7 +5,7 @@ description: Make tasks ready for worker agents - run orchestra-task lint, then 
 
 # orchestra-refine
 
-Follow "refine" in `docs/planning-guide.md` in the orchestra repository (from this skill's folder: `../../../docs/planning-guide.md`). For each task (`<id>`, a wave, or all):
+Follow "refine" in the guide printed by `orchestra-worker guide planning`. For each task (`<id>`, a wave, or all):
 
 1. `orchestra-task lint <ids>`: fix every error it reports.
    Then, for each task beyond a few files, `orchestra-worker scout <id> --spec <task file>`: a read-only worker

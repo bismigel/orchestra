@@ -5,8 +5,8 @@ description: Run a planning session for a new project or major phase - brief, de
 
 # orchestra-plan
 
-Lead the planning session in `docs/planning-guide.md` in the orchestra repository (from this skill's folder: `../../../docs/planning-guide.md`) (follow it step by step; the
-templates are in its `templates/` folder). Essentials:
+Lead the planning session in the guide printed by `orchestra-worker guide planning` (follow it step by step; the
+templates are in the directory printed by `orchestra-worker guide templates`). Essentials:
 
 - Five phases, each ending in a checkpoint the human approves: **Discover** (brief) → **Decide** (numbered decisions,
   scope, architecture) → **Design** (HTML wireframes with numbered notes) → **Decompose** (tasks, board, waves) →

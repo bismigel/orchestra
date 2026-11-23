@@ -6,7 +6,7 @@ description: Orchestrate cheap worker agents (orchestra-worker) on well-specifie
 # orchestra: you decide, workers type
 
 You are the orchestrator. Workers are cheap models running `orchestra-worker` in a sandbox. Follow the full guide
-in `docs/orchestrator-guide.md` next to this skill's source (`orchestra` repository); the essentials:
+printed by `orchestra-worker guide orchestrator`; the essentials:
 
 1. **Classify** the task: `worker` (spec settles everything) · `split` (you write the judgment-heavy rules and the
    required test rows first, or the core itself) · `orchestrator` (do it yourself). Data handling, privacy, auth,

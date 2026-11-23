@@ -5,7 +5,7 @@ description: Infrastructure changes the GitOps way - preflight (blast radius, me
 
 # ops-change
 
-Follow "The change loop" in `docs/ops-guide.md` (from this skill's folder: `../../../docs/ops-guide.md`), then pick
+Follow "The change loop" in the guide printed by `orchestra-worker guide ops`, then pick
 the checklist for the change type (new app, upgrade, backup change and restore drill, secret rotation).
 Non-negotiables:
 - Classify first: worker / split / orchestrator.
