@@ -5,7 +5,8 @@ A candidate is a git worktree directly under --worktrees for --repo. Each one is
 
   running         .orchestra/run.json has a live pid: a worker is using it now
   dirty           untracked or modified files outside .orchestra/: work that is not in git
-  landed          HEAD is an ancestor of --base: the task is on the base branch
+  landed          HEAD is an ancestor of --base, or every commit on the branch has an identical patch on --base
+                  (cherry-picked or rebased): the task is on the base branch
   squash-landed   a commit on --base has the subject "<task>: ..."; only removed with --include-squashed
   open            anything else: unlanded, so it stays
 
@@ -67,6 +68,11 @@ def classify(repo, worktree, task, base, include_squashed):
         return "dirty", "keep"
     if git(worktree, "merge-base", "--is-ancestor", "HEAD", base).returncode == 0:
         return "landed", "remove"
+    # Cherry-picked or rebased onto the base: every commit of the branch has an identical patch there.
+    cherry = git(worktree, "cherry", base, "HEAD")
+    marks = [line[:1] for line in cherry.stdout.splitlines() if line.strip()]
+    if cherry.returncode == 0 and marks and all(m == "-" for m in marks):
+        return "landed", "remove"
     subjects = git(repo, "log", "--format=%s", base)
     if subjects.returncode == 0 and any(s.startswith(task + ":") for s in subjects.stdout.splitlines()):
         return "squash-landed", "remove" if include_squashed else "keep (needs --include-squashed)"
@@ -108,9 +114,12 @@ def scout_dirs(worktrees):
 
 
 def table(rows):
-    print("TASK  CLASS  ACTION  PATH")
+    head = ("TASK", "CLASS", "ACTION", "PATH")
+    widths = [max([len(head[i])] + [len(r[i]) for r in rows]) for i in range(3)]
+    fmt = "%%-%ds  %%-%ds  %%-%ds  %%s" % tuple(widths)
+    print(fmt % head)
     for task, cls, action, path in rows:
-        print("%s  %s  %s  %s" % (task, cls, action, path))
+        print(fmt % (task, cls, action, path))
 
 
 def main():

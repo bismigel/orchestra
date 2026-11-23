@@ -26,10 +26,10 @@ check() { # check <name> <condition...>
   if "$@"; then ok "$name"; else bad "$name"; fi
 }
 row_has() { # row_has <description> <task> <class> <action>
-  if grep -qF -- "$2  $3  $4  " <<<"$OUT"; then ok "$1"; else bad "$1: no '$2  $3  $4' row"; fi
+  if grep -qF -- "$2 $3 $4 " <<<"$(tr -s ' ' <<<"$OUT")"; then ok "$1"; else bad "$1: no '$2 $3 $4' row"; fi
 }
 row_hasnt() { # row_hasnt <description> <task> <class> <action>
-  if grep -qF -- "$2  $3  $4  " <<<"$OUT"; then bad "$1: found '$2  $3  $4'"; else ok "$1"; fi
+  if grep -qF -- "$2 $3 $4 " <<<"$(tr -s ' ' <<<"$OUT")"; then bad "$1: found '$2 $3 $4'"; else ok "$1"; fi
 }
 exists()   { [ -d "$1" ]; }
 is_gone()  { [ ! -e "$1" ]; }
@@ -91,6 +91,11 @@ build_fixture() (
   git worktree add -q -b D "$WT/D" main
   ( cd "$WT/D"; echo d > d.txt; git add d.txt; git commit -qm "D: work" )
 
+  # P: its own commit, cherry-picked onto main (an identical patch there): landed.
+  git worktree add -q -b P "$WT/P" main
+  ( cd "$WT/P"; echo p > p.txt; git add p.txt; git commit -qm "feat: p" )
+  git cherry-pick "$(git -C "$WT/P" rev-parse HEAD)" >/dev/null
+
   # H: landed, but in another directory, so never a candidate.
   mkdir -p "$TMP/elsewhere"
   git worktree add -q -b H "$TMP/elsewhere/H" main
@@ -132,8 +137,9 @@ row_has "E with a live pid is running"       E  running         keep
 row_has "F with a dead pid is landed"        F  landed          remove
 row_has "G with an untracked file is dirty"  G  dirty           keep
 row_has "S1 is a removable scout run"        S1 scout           remove
+row_has "P cherry-picked onto main is landed" P landed          remove
 if grep -qF "elsewhere/H" <<<"$OUT"; then bad "the outside worktree was listed"; else ok "the outside worktree is not listed"; fi
-if grep -qF "3 to remove; run again with --yes to remove them" <<<"$OUT"; then
+if grep -qF "4 to remove; run again with --yes to remove them" <<<"$OUT"; then
   ok "listing counts the removable entries"
 else bad "listing summary missing or wrong: $(grep 'to remove' <<<"$OUT")"; fi
 for t in A B C D E F G; do check "listing kept worktree $t" exists "$WT/$t"; done
@@ -144,7 +150,7 @@ check "listing kept the outside worktree" exists "$TMP/elsewhere/H"
 OUT=$(run_clean --include-squashed); rc=$?
 check "listing with --include-squashed exits 0" [ "$rc" = 0 ]
 row_has "B becomes removable with --include-squashed" B squash-landed remove
-if grep -qF "4 to remove; run again with --yes to remove them" <<<"$OUT"; then
+if grep -qF "5 to remove; run again with --yes to remove them" <<<"$OUT"; then
   ok "--include-squashed listing counts B"
 else bad "wrong --include-squashed listing summary"; fi
 for t in A B C D E F G; do check "--include-squashed listing kept worktree $t" exists "$WT/$t"; done
@@ -152,7 +158,7 @@ for t in A B C D E F G; do check "--include-squashed listing kept worktree $t" e
 # 2. --yes without --include-squashed: remove A, F and S1 only.
 OUT=$(run_clean --yes); rc=$?
 check "--yes exits 0" [ "$rc" = 0 ]
-for t in A F; do check "--yes removed worktree $t" is_gone "$WT/$t"; done
+for t in A F P; do check "--yes removed worktree $t" is_gone "$WT/$t"; done
 check "--yes removed scout S1" is_gone "$WT/.scout/S1"
 for t in B C D E G; do check "--yes kept worktree $t" exists "$WT/$t"; done
 check "--yes kept the outside worktree" exists "$TMP/elsewhere/H"
@@ -170,7 +176,7 @@ check "the squash run kept the outside worktree" exists "$TMP/elsewhere/H"
 if grep -qF "removed B" <<<"$OUT"; then ok "--include-squashed printed removed B"; else bad "--include-squashed did not remove B"; fi
 
 # 4. Nothing that was not removable was touched, and no branch was deleted.
-for b in A B C D E F G H; do check "branch $b still exists" branch_exists "$b"; done
+for b in A B C D E F G H P; do check "branch $b still exists" branch_exists "$b"; done
 check "the branch list is unchanged" [ "$(git -C "$REPO" for-each-ref --format='%(refname)' refs/heads)" = "$BRANCHES_BEFORE" ]
 check "the main checkout HEAD is unchanged" [ "$(git -C "$REPO" rev-parse HEAD)" = "$MAIN_HEAD" ]
 check "the main checkout status is unchanged" [ "$(git -C "$REPO" status --porcelain --untracked-files=all)" = "$MAIN_STATUS" ]

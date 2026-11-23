@@ -19,6 +19,8 @@ in `docs/orchestrator-guide.md` next to this skill's source (`orchestra` reposit
 3. **Launch** as a background command so you are notified on exit:
    `orchestra-worker run <id> --spec <file>`; feedback rounds: `orchestra-worker run <id> --feedback <file>`.
    Keep 2-3 workers at most. Model, key and sandbox come from orchestra's config; never pass keys on the command line.
+   The run's output has one progress line per tool call, for the user. When it ends, read only the card:
+   `sed -n '/^── /,$p' <output file>` (or go straight to `review`), not the whole log.
 4. **Review** every run, starting with `orchestra-worker review <id>`: exit meaning, **blocking** questions (decide
    them), **assumed** calls (skim), files outside the spec's paths, claimed checks, proofs for the exact code, diff
    stat. Then the full diff (`orchestra-worker diff <id>`), your own run of the checks (`orchestra-worker prove <id>`;

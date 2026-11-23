@@ -30,7 +30,8 @@ going at most: your review is the bottleneck. Each run is capped by `ORCHESTRA_T
 
 A run prints one line per tool call while it works (`T41 03:12 #14 edit internal/web/layout.templ`), a `quiet for`
 line when nothing happened for a minute, and a card when it ends: exit meaning, time, cost, blocking questions
-first. You do not need to read that output while it runs; the person watching does. `ORCHESTRA_PROGRESS=0` turns the
+first. You do not need to read that output while it runs; the person watching does. When it ends, read only the card
+(`sed -n '/^── /,$p' <output>`), or go straight to `review`: the progress lines would cost you tokens for nothing. `ORCHESTRA_PROGRESS=0` turns the
 lines off.
 
 ## Is it still running?
