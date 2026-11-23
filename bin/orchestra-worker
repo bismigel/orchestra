@@ -3,6 +3,13 @@
 #
 #   orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>] [--dry-run]
 #   orchestra-worker summary <task-id> [--worktree <dir>]
+#   orchestra-worker diff <task-id> [--worktree <dir>] [--stat]     review diff, generated files only in the stat
+#   orchestra-worker prove <task-id> [--worktree <dir>] [--manual "what you checked"]
+#   orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]
+#
+# prove runs the landing gate and the task's `proof:` checks in the worktree (outside the sandbox) and records one
+# line per check, bound to a hash of the exact code. land rebases, squashes, proves that code and pushes, with
+# Proof: trailers. A worker's report is a claim; a proof is evidence orchestra produced itself (docs/proofs.md).
 #
 # The orchestrator (a stronger model, or you) decides; the worker implements. See docs/design.md.
 # Exit codes: 0 ok · 2 usage/config error · 3 model policy violation · 4 no or invalid report · 124 timeout ·
@@ -17,8 +24,11 @@ main() {
   case "$cmd" in
     run) cmd_run "$here" "$@" ;;
     summary) cmd_summary "$here" "$@" ;;
-    -h|--help|help|"") sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
-    *) die "unknown command: $cmd (try: run, summary)" ;;
+    diff) cmd_diff "$here" "$@" ;;
+    prove) cmd_prove "$here" "$@" ;;
+    land) cmd_land "$here" "$@" ;;
+    -h|--help|help|"") sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
+    *) die "unknown command: $cmd (try: run, summary, diff, prove, land)" ;;
   esac
 }
 
@@ -49,6 +59,12 @@ load_config() {
   ORCHESTRA_CHECKS=${ORCHESTRA_CHECKS:-the test and lint commands documented in the repository}
   ORCHESTRA_RW_BINDS=${ORCHESTRA_RW_BINDS:-}
   ORCHESTRA_RO_BINDS=${ORCHESTRA_RO_BINDS:-}
+  ORCHESTRA_BASE=${ORCHESTRA_BASE:-origin/main}                 # what tasks are reviewed against and land on
+  ORCHESTRA_GATE=${ORCHESTRA_GATE:-}                            # the repository's landing gate, one shell command
+  ORCHESTRA_TASKS_DIR=${ORCHESTRA_TASKS_DIR:-docs/work/tasks}
+  ORCHESTRA_PUSH_CMD=${ORCHESTRA_PUSH_CMD:-git push origin HEAD:refs/heads/{branch}}
+  ORCHESTRA_GENERATED=${ORCHESTRA_GENERATED:-*_templ.go *.pb.go *_gen.go *.gen.go *.min.js *.min.css go.sum package-lock.json yarn.lock pnpm-lock.yaml Cargo.lock poetry.lock uv.lock}
+  [ "${ORCHESTRA_NEEDS_MODEL:-1}" = 0 ] && return 0
   [ -n "$ORCHESTRA_MODEL" ] || die "set ORCHESTRA_MODEL (provider/model, e.g. deepseek/deepseek-flash) in config.env"
 }
 
@@ -297,6 +313,162 @@ cmd_summary() {
   shopt -s nullglob; local runs=("$wt"/.orchestra/runs/run-*.jsonl); shopt -u nullglob
   [ ${#runs[@]} -gt 0 ] || die "no runs for $task in $wt"
   print_summary "$task" "$wt/.orchestra" "${#runs[@]}" "-"
+}
+
+# ---- review and landing: diff, prove, land (no model involved) ----------------------------------------------------
+
+# task_setup <task> <wt-or-empty>: sets repo, wt, state for a command that works on an existing task worktree.
+task_setup() {
+  local task=$1; wt=$2
+  [[ $task =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
+  repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
+  [ -n "$wt" ] || wt="$(dirname "$repo")/$(basename "$repo")-worktrees/$task"
+  wt=$(realpath -m "$wt"); [ -d "$wt" ] || die "no worktree for $task at $wt"
+  state="$wt/.orchestra"; mkdir -p "$state/proofs"
+  local common; common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)
+  grep -qxF '.orchestra/' "$common/info/exclude" 2>/dev/null || echo '.orchestra/' >> "$common/info/exclude"
+}
+
+# work_tree <wt>: the git tree hash of everything in the worktree (tracked and untracked, not ignored), without
+# touching the real index. Any change to the code changes it, which is what makes a proof stale.
+work_tree() {
+  local wt=$1 idx; idx=$(mktemp)
+  cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
+  GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1
+  GIT_INDEX_FILE=$idx git -C "$wt" write-tree; rm -f "$idx"
+}
+
+# spec_file <wt> <task>: the task's spec in the worktree, or the copy a run made.
+spec_file() {
+  local f; for f in "$1/$ORCHESTRA_TASKS_DIR/$2"-*.md "$1/.orchestra/spec.md"; do [ -f "$f" ] && { echo "$f"; return 0; }; done
+  return 0   # no spec is fine (the gate still runs); never trip set -e in the caller's assignment
+}
+
+# checks <wt> <task>: the gate, then every `proof:` line of the spec (- proof: `command`), one per line.
+checks() {
+  [ -n "$ORCHESTRA_GATE" ] && printf '%s\n' "$ORCHESTRA_GATE"
+  local spec; spec=$(spec_file "$1" "$2")
+  [ -n "$spec" ] && grep -oE 'proof:[[:space:]]*`[^`]+`' "$spec" | sed -E 's/^proof:[[:space:]]*`(.*)`$/\1/'
+  return 0
+}
+
+cmd_diff() {
+  local here=$1; shift; local task="" wt="" stat=0
+  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; --stat) stat=1; shift ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker diff <task-id> [--worktree <dir>] [--stat]"
+  local repo state; task_setup "$task" "$wt"
+  local mb; mb=$(git -C "$wt" merge-base HEAD "$ORCHESTRA_BASE" 2>/dev/null) || die "no merge base with $ORCHESTRA_BASE (fetch first?)"
+  local idx; idx=$(mktemp); cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx"
+  GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1
+  local -a ex=(); local g; for g in $ORCHESTRA_GENERATED; do ex+=(":(exclude,glob)**/$g"); done
+  GIT_INDEX_FILE=$idx git -C "$wt" --no-pager diff --cached --stat=120 "$mb" -- . ':(exclude).orchestra'
+  if [ "$stat" = 0 ]; then
+    echo "(generated files are in the stat above, not below: ORCHESTRA_GENERATED)"
+    GIT_INDEX_FILE=$idx git -C "$wt" --no-pager diff --cached "$mb" -- . ':(exclude).orchestra' "${ex[@]}"
+  fi
+  rm -f "$idx"
+}
+
+# prove_all <wt> <task>: run every check not yet proven on the current code; one line each. Returns 1 on a failure.
+prove_all() {
+  local wt=$1 task=$2 tree; tree=$(work_tree "$wt")
+  local devenv="$wt/.orchestra/devenv.sh" ok=0 n=0 line
+  if [ -n "$ORCHESTRA_DEVENV_CMD" ] && { [ ! -s "$devenv" ] || [ "$(find "$devenv" -mmin +1440 2>/dev/null)" ]; }; then
+    (cd "$wt" && bash -c "$ORCHESTRA_DEVENV_CMD") > "$devenv" 2>/dev/null || die "ORCHESTRA_DEVENV_CMD failed"
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue; n=$((n+1))
+    if python3 -I - "$wt/.orchestra/proofs.jsonl" "$tree" "$line" <<'PY'
+import json, sys
+f, tree, check = sys.argv[1:]
+try: rows = [json.loads(l) for l in open(f)]
+except OSError: rows = []
+sys.exit(0 if any(r.get("tree") == tree and r.get("check") == check and r.get("exit") == 0 for r in rows) else 1)
+PY
+    then echo "PASS  (proven)  $line"; continue; fi
+    local log="$wt/.orchestra/proofs/$(date +%s)-$n.log" t0=$SECONDS rc=0
+    if [ -s "$devenv" ]; then (cd "$wt" && bash -c '. "$1" >/dev/null 2>&1; shift; eval "$1"' _ "$devenv" "$line") > "$log" 2>&1 </dev/null || rc=$?
+    else (cd "$wt" && bash -c "$line") > "$log" 2>&1 </dev/null || rc=$?; fi
+    local secs=$((SECONDS-t0))
+    python3 -I -c 'import json,sys,time; print(json.dumps({"check":sys.argv[1],"exit":int(sys.argv[2]),"secs":int(sys.argv[3]),"tree":sys.argv[4],"at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),"log":sys.argv[5]}))' \
+      "$line" "$rc" "$secs" "$tree" "$log" >> "$wt/.orchestra/proofs.jsonl"
+    if [ "$rc" = 0 ]; then echo "PASS  (${secs}s)  $line"
+    else ok=1; echo "FAIL  (${secs}s, exit $rc)  $line"; tail -n 15 "$log" | sed 's/^/      /'; echo "      full log: $log"; fi
+  done < <(checks "$wt" "$task")
+  [ "$n" -gt 0 ] || { echo "no checks: set ORCHESTRA_GATE or add \`proof:\` lines to the spec"; return 1; }
+  echo "tree ${tree:0:12}"
+  return $ok
+}
+
+cmd_prove() {
+  local here=$1; shift; local task="" wt="" manual=""
+  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; --manual) manual=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker prove <task-id> [--worktree <dir>] [--manual \"what you checked\"]"
+  local repo state; task_setup "$task" "$wt"
+  if [ -n "$manual" ]; then
+    python3 -I -c 'import json,sys,time; print(json.dumps({"manual":sys.argv[1],"tree":sys.argv[2],"at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())}))' \
+      "$manual" "$(work_tree "$wt")" >> "$state/proofs.jsonl"
+    echo "recorded manual proof: $manual"; return 0
+  fi
+  prove_all "$wt" "$task"
+}
+
+cmd_land() {
+  local here=$1; shift; local task="" wt="" msgfile=""
+  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; --message-file) msgfile=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]"
+  local repo state; task_setup "$task" "$wt"
+  [ -z "$msgfile" ] || [ -f "$msgfile" ] || die "message file not found: $msgfile"
+  local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/} attempt
+  [ "$remote" != "$ORCHESTRA_BASE" ] || die "ORCHESTRA_BASE must be <remote>/<branch>"
+  local title="" spec; spec=$(spec_file "$wt" "$task")
+  [ -n "$spec" ] && title=$(sed -n 's/^title:[[:space:]]*//p' "$spec" | head -1)
+  # Uncommitted work becomes one commit first; everything is squashed below.
+  if [ -n "$(git -C "$wt" status --porcelain)" ]; then git -C "$wt" add -A && git -C "$wt" commit -qm "wip $task"; fi
+  # Keep a message someone already wrote: the newest commit on the branch that is not a claim, wip or squash.
+  local kept=""; if [ -z "$msgfile" ]; then
+    local c; for c in $(git -C "$wt" rev-list "$ORCHESTRA_BASE..HEAD" 2>/dev/null); do
+      case "$(git -C "$wt" log -1 --format=%s "$c")" in "claim "*|"wip "*|"squash "*) continue ;; esac
+      kept=$(mktemp); git -C "$wt" log -1 --format=%B "$c" | grep -v '^Proof: ' > "$kept"; break
+    done
+  fi
+  for attempt in 1 2; do
+    git -C "$wt" fetch -q "$remote" || die "fetch failed"
+    git -C "$wt" rebase -q "$ORCHESTRA_BASE" >/dev/null 2>&1 || { git -C "$wt" rebase --abort 2>/dev/null; die "rebase onto $ORCHESTRA_BASE has conflicts: resolve them in $wt, then land again"; }
+    # Squash onto the base we just rebased on (safe: nothing on the base is behind us, so nothing is reverted).
+    if [ "$(git -C "$wt" rev-list --count "$ORCHESTRA_BASE..HEAD")" -gt 1 ] || [ "$(git -C "$wt" log -1 --format=%s)" = "wip $task" ]; then
+      git -C "$wt" reset -q --soft "$ORCHESTRA_BASE"
+      git -C "$wt" commit -qm "squash $task" --allow-empty
+    fi
+    [ "$(git -C "$wt" rev-list --count "$ORCHESTRA_BASE..HEAD")" = 1 ] || die "nothing to land for $task"
+    echo "changes:"; git -C "$wt" --no-pager diff --stat=100 "$ORCHESTRA_BASE" HEAD | tail -n 12 | sed 's/^/  /'
+    prove_all "$wt" "$task" || die "not landed: a check failed (the worktree is rebased and squashed; fix, then land again)"
+    # Message: the given file, or "<task>: <title>"; then one Proof: trailer per check and manual proof.
+    local msg; msg=$(mktemp)
+    if [ -n "$msgfile" ]; then cat "$msgfile" > "$msg"
+    elif [ -n "$kept" ]; then sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$kept" > "$msg"
+    else printf '%s: %s\n' "$task" "${title:-$task}" > "$msg"; fi
+    python3 -I - "$state/proofs.jsonl" "$(work_tree "$wt")" >> "$msg" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+tree = sys.argv[2]
+lines, seen = [], set()
+for r in rows:
+    if r.get("tree") == tree and r.get("exit") == 0 and r["check"] not in seen:
+        seen.add(r["check"]); lines.append(f'Proof: pass ({r["secs"]}s) tree {tree[:12]}: {r["check"]}')
+for r in rows:
+    if "manual" in r and r["manual"] not in seen:
+        seen.add(r["manual"]); lines.append(f'Proof: manual: {r["manual"]}')
+print("\n" + "\n".join(lines))
+PY
+    git -C "$wt" commit -q --amend -F "$msg"; rm -f "$msg"
+    if (cd "$wt" && bash -c "${ORCHESTRA_PUSH_CMD//\{branch\}/$branch}") >/dev/null 2>&1; then
+      echo "landed $task: $(git -C "$wt" log -1 --format='%h %s')"; return 0
+    fi
+    echo "push rejected ($ORCHESTRA_BASE moved); rebasing and proving again"
+  done
+  die "push rejected twice; land again when $ORCHESTRA_BASE is quiet"
 }
 
 main "$@"

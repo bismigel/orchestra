@@ -22,7 +22,7 @@ Everything the task needs decided, written as rules. Nothing left to the worker'
 - `path/file`: the only change allowed (include existing tests that assert behaviour this task changes)
 
 ## Acceptance
-- `the command the worker runs` (test names where possible)
+- proof: `the command that proves it` (orchestra runs it on the exact code before landing; test names where possible)
 - Orchestrator: checks a worker cannot do (screenshots, live checks)
 
 ## Out of scope

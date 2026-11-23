@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 (2026-11-23)
+- **Proofs** ([docs/proofs.md](docs/proofs.md)): `orchestra-worker prove` runs the landing gate
+  (`ORCHESTRA_GATE`) and the spec's `proof:` lines in the worktree, without a model, and records one line per check
+  bound to a hash of the exact code; a change makes the proof stale. Manual proofs with `--manual`.
+- **`orchestra-worker land`**: rebase, squash (claim and wip commits dropped, a written message kept), prove the
+  result, push with `Proof:` trailers; refuses on any failing check; retries once if the base moved.
+- **`orchestra-worker diff`**: the review diff without generated files (`ORCHESTRA_GENERATED`; still in the stat).
+- Offline suite: 86 checks.
+
 ## 0.2.0 (2026-11-22)
 - **Planning**: `orchestra-plan` and `orchestra-refine` skills, `docs/planning-guide.md`, templates (brief, scope,
   decisions, architecture, task, wireframe, lessons). Proposal 0001.
