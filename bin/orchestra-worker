@@ -777,8 +777,90 @@ cmd_lessons() {
     --tree "$(work_tree "$wt")" --json | python3 -I "$here/lib/lessons.py" --task "$task"
 }
 
-# cmd_doctor: implemented below by the orchestrator (key handling).
-cmd_doctor() { die "doctor: not implemented yet"; }
+# cmd_doctor: check everything a run depends on, before a run finds out. Never prints the API key: only its length
+# and a short fingerprint. Exit 1 when anything FAILs; warnings do not fail.
+cmd_doctor() {
+  local here=$1; shift
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
+  local nfail=0 nwarn=0
+  ok_()   { echo "ok    $*"; }
+  warn_() { echo "warn  $*"; nwarn=$((nwarn+1)); }
+  fail_() { echo "FAIL  $*"; nfail=$((nfail+1)); }
+  local g="${XDG_CONFIG_HOME:-$HOME/.config}/orchestra/config.env" f
+  for f in "$g" "$repo/.orchestra/config.env"; do
+    if [ -f "$f" ]; then ok_ "config: $f"; else echo "info  config: $f (not present)"; fi
+  done
+  # Model
+  if [ -z "$ORCHESTRA_MODEL" ]; then fail_ "ORCHESTRA_MODEL is not set"
+  elif model_allowed "$ORCHESTRA_MODEL"; then ok_ "model $ORCHESTRA_MODEL (allowed: $ORCHESTRA_ALLOWED_MODELS)"
+  else fail_ "model $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS ($ORCHESTRA_ALLOWED_MODELS)"; fi
+  # Harness
+  local hf="$here/lib/harness/$ORCHESTRA_HARNESS.sh"
+  case "$ORCHESTRA_HARNESS" in */*) hf=$(realpath -m "$ORCHESTRA_HARNESS") ;; esac
+  if [ -f "$hf" ]; then
+    ok_ "harness $ORCHESTRA_HARNESS ($hf)"
+    if [ "$ORCHESTRA_HARNESS" = pi ]; then
+      if command -v pi >/dev/null; then ok_ "pi $(pi --version 2>/dev/null | head -1) at $(command -v pi)"; else fail_ "pi is not on PATH"; fi
+    fi
+    if [ -n "$(progress_script "$hf")" ]; then ok_ "progress reader: live progress and ORCHESTRA_MAX_COST available"
+    else warn_ "no progress reader for this harness: no live progress, ORCHESTRA_MAX_COST cannot be used"; fi
+  else fail_ "harness '$ORCHESTRA_HARNESS' not found ($hf)"; fi
+  # Sandbox
+  case "$ORCHESTRA_SANDBOX" in
+    bwrap)
+      if ! command -v bwrap >/dev/null; then fail_ "bubblewrap (bwrap) is not installed"
+      elif bwrap --unshare-all --share-net --ro-bind / / --dev /dev --proc /proc true 2>/dev/null; then
+        ok_ "sandbox: bwrap $(bwrap --version 2>/dev/null | awk '{print $2}') can create namespaces"
+        if bwrap --unshare-all --ro-bind / / --dev /dev --proc /proc true 2>/dev/null; then ok_ "sandbox: private network namespaces work (needed by ORCHESTRA_EGRESS_ALLOW)"
+        else warn_ "sandbox: cannot create a private network namespace: ORCHESTRA_EGRESS_ALLOW will fail"; fi
+      else fail_ "sandbox: bwrap cannot create namespaces (unprivileged user namespaces disabled? see docs/security.md)"; fi ;;
+    none) if [ "${ORCHESTRA_ALLOW_UNSANDBOXED:-}" = 1 ]; then warn_ "ORCHESTRA_SANDBOX=none: workers run UNSANDBOXED"
+          else fail_ "ORCHESTRA_SANDBOX=none without ORCHESTRA_ALLOW_UNSANDBOXED=1"; fi ;;
+    *) fail_ "unknown ORCHESTRA_SANDBOX '$ORCHESTRA_SANDBOX'" ;;
+  esac
+  # Egress allowlist
+  if [ -n "$ORCHESTRA_EGRESS_ALLOW" ]; then
+    if python3 -I "$here/lib/egress_proxy.py" --check --allow "$ORCHESTRA_EGRESS_ALLOW" 2>/dev/null; then ok_ "egress allowlist: $ORCHESTRA_EGRESS_ALLOW"
+    else fail_ "egress allowlist is malformed: $(python3 -I "$here/lib/egress_proxy.py" --check --allow "$ORCHESTRA_EGRESS_ALLOW" 2>&1)"; fi
+    [ "$ORCHESTRA_SANDBOX" = bwrap ] || fail_ "ORCHESTRA_EGRESS_ALLOW needs ORCHESTRA_SANDBOX=bwrap"
+  else echo "info  egress: the sandbox shares the host network (set ORCHESTRA_EGRESS_ALLOW to confine it)"; fi
+  # Key: fetched, measured, never shown
+  if [ -z "$ORCHESTRA_KEY_ENV" ]; then echo "info  no API key configured (ORCHESTRA_KEY_ENV empty: fine for local models)"
+  else
+    local k="" how
+    if [ -n "$ORCHESTRA_KEY_CMD" ]; then how="ORCHESTRA_KEY_CMD"; k=$(bash -c "$ORCHESTRA_KEY_CMD" 2>/dev/null </dev/null) || k=""
+    else how="\$$ORCHESTRA_KEY_ENV"; k=${!ORCHESTRA_KEY_ENV:-}; fi
+    if [ -n "$k" ]; then ok_ "key from $how: ${#k} characters, fingerprint $(printf '%s' "$k" | sha256sum | cut -c1-8)"
+    else fail_ "no key from $how (empty or the command failed)"; fi
+    unset k
+  fi
+  # Repository: base, gate, dev environment, caches, budget
+  if git -C "$repo" rev-parse --verify -q "$ORCHESTRA_BASE^{commit}" >/dev/null; then ok_ "base $ORCHESTRA_BASE ($(git -C "$repo" rev-parse --short "$ORCHESTRA_BASE"))"
+  else fail_ "base $ORCHESTRA_BASE does not resolve (fetch, or set ORCHESTRA_BASE)"; fi
+  if [[ $ORCHESTRA_BASE == */* ]] && ! git -C "$repo" remote | grep -qxF "${ORCHESTRA_BASE%%/*}"; then
+    warn_ "base $ORCHESTRA_BASE is not <remote>/<branch> of a configured remote: land needs one"; fi
+  if [ -n "$ORCHESTRA_GATE" ]; then ok_ "gate: $ORCHESTRA_GATE"
+  else warn_ "no ORCHESTRA_GATE: prove and land run only the spec's proof: lines"; fi
+  if [ -n "$ORCHESTRA_DEVENV_CMD" ]; then
+    local t0=$SECONDS
+    if (cd "$repo" && timeout 300 bash -c "$ORCHESTRA_DEVENV_CMD") >/dev/null 2>&1; then ok_ "dev environment command works ($((SECONDS - t0))s)"
+    else fail_ "ORCHESTRA_DEVENV_CMD failed: $ORCHESTRA_DEVENV_CMD"; fi
+  fi
+  local pair src
+  for pair in $ORCHESTRA_RW_BINDS $ORCHESTRA_RO_BINDS; do src=${pair%%:*}; src=${src/#\~/$HOME}
+    [ -d "$src" ] || warn_ "bind source $src does not exist yet (it will be created)"; done
+  if [ -n "${ORCHESTRA_MAX_COST:-}" ]; then
+    if [[ $ORCHESTRA_MAX_COST =~ ^[0-9]+(\.[0-9]+)?$ ]]; then ok_ "budget: at most \$$ORCHESTRA_MAX_COST per run"
+    else fail_ "ORCHESTRA_MAX_COST must be a number of dollars (got '$ORCHESTRA_MAX_COST')"; fi
+  else echo "info  no ORCHESTRA_MAX_COST: runs are limited by ORCHESTRA_TIMEOUT ($ORCHESTRA_TIMEOUT) only"; fi
+  local base_dir; base_dir="$(dirname "$repo")/$(basename "$repo")-worktrees"
+  local stale; stale=$(cmd_status "$here" --json 2>/dev/null | python3 -I -c 'import json,sys; print(sum(1 for r in json.load(sys.stdin)["runs"] if r["state"] == "stale"))' 2>/dev/null || echo 0)
+  [ "${stale:-0}" = 0 ] || warn_ "$stale stale run state file(s): orchestra-worker status --prune"
+  [ -d "$base_dir" ] && echo "info  worktrees: $base_dir"
+  echo "--- $nfail failed, $nwarn warning(s)"
+  [ "$nfail" = 0 ]
+}
 
 # cmd_guide [<name>] [--print]: the absolute path of a guide (or its text), so skills never guess relative paths.
 cmd_guide() {
