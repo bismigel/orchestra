@@ -1,0 +1,23 @@
+{
+  "task": "S1",
+  "named": [
+    {"spec_says": "marketing.go", "found": false, "actual": "internal/web/legal.go:40", "note": "renamed"},
+    {"spec_says": "internal/web/intake.go", "found": true, "actual": "internal/web/intake.go", "note": ""}
+  ],
+  "files_to_change": [
+    {"path": "internal/web/legal.go", "why": "the handler moved here", "in_spec": false},
+    {"path": "internal/web/intake.go", "why": "wire the new field", "in_spec": true}
+  ],
+  "tests_affected": [
+    {"path": "internal/web/notice_test.go", "test": "TestNotice", "why": "the rendered notice text changes"}
+  ],
+  "patterns": [
+    {"path": "internal/web/intake.go", "what": "the upload picker to copy"}
+  ],
+  "commands": [
+    {"command": "go test ./services/extractor/", "runs": false, "fixed": "cd services/extractor && go test ./..."},
+    {"command": "go test ./internal/web/", "runs": true, "fixed": ""}
+  ],
+  "size": {"files": 8, "lines": 300, "split": "the extractor command first, then the web handler"},
+  "undecided": ["whether the notice is HTML or plain text"]
+}
