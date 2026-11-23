@@ -3,6 +3,9 @@
 Read-only and offline. Called by `orchestra-worker review`; see that command for the flags. The only state it
 touches is the worktree's .orchestra/ directory, and it never modifies the worktree's real git index: changed files
 are computed on a temporary copy of the index.
+
+The digest is built once in `collect()` and rendered twice: as the text screen (`render_text`) and, with --json, as
+one JSON object (`render_json`).
 """
 import argparse
 import fnmatch
@@ -68,42 +71,23 @@ def number(value):
         return 0.0
 
 
-def header(task, state):
-    runs_dir = os.path.join(state, "runs")
-    nums = run_numbers(runs_dir, "jsonl")
-    if not nums:
-        print(f"{task} · no worker runs")
-        return
-    n = max(nums)
-    result = load_json(os.path.join(runs_dir, f"run-{n}.result.json"))
-    usage = load_json(os.path.join(runs_dir, f"run-{n}.usage.json")) or {}
+def int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
-    if isinstance(result, dict) and "exit" in result:
-        code = result.get("exit")
-        try:
-            code = int(code)
-        except (TypeError, ValueError):
-            code = str(code)
-        meaning = EXIT_MEANING.get(code, "harness failed")
-        exit_part = f"exit {code} ({meaning})"
-        took = duration(result.get("secs"))
-        took_part = f" · {took}" if took else ""
-    else:
-        exit_part = "exit ?"
-        took_part = ""
 
-    responses = usage.get("responses", 0) if isinstance(usage, dict) else 0
-    cost = number(usage.get("cost")) if isinstance(usage, dict) else 0.0
+def text_list(value):
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
 
-    total = 0.0
-    for path in glob.glob(os.path.join(runs_dir, "run-*.usage.json")):
-        data = load_json(path)
-        if isinstance(data, dict):
-            total += number(data.get("cost"))
-    count = len(set(nums) | run_numbers(runs_dir, "usage.json"))
 
-    print(f"{task} · run {n} {exit_part}{took_part} · {responses} responses · "
-          f"${cost:.4f} (task total: ${total:.4f}, {count} run{"" if count == 1 else "s"})")
+def str_or_none(value):
+    if value is None:
+        return None
+    return value if isinstance(value, str) else str(value)
 
 
 def changed_files(worktree, base):
@@ -150,7 +134,7 @@ def changed_files(worktree, base):
                 r = 0 if removed == "-" else int(removed)
             except ValueError:
                 a = r = 0
-            out.append({"path": path, "add": a, "del": r})
+            out.append({"path": path, "added": a, "removed": r})
         return out
     finally:
         try:
@@ -214,6 +198,225 @@ def read_proofs(state):
     return rows
 
 
+def collect(args, state):
+    """Everything the text screen and the JSON object need, in one dict."""
+    runs_dir = os.path.join(state, "runs")
+    nums = run_numbers(runs_dir, "jsonl")
+
+    run = None
+    run_display = None
+    if nums:
+        n = max(nums)
+        result = load_json(os.path.join(runs_dir, f"run-{n}.result.json"))
+        usage = load_json(os.path.join(runs_dir, f"run-{n}.usage.json")) or {}
+
+        exit_code = None
+        meaning = ""
+        secs = None
+        if isinstance(result, dict) and "exit" in result:
+            raw = result.get("exit")
+            exit_code = int_or_none(raw)
+            if exit_code is not None:
+                meaning = EXIT_MEANING.get(exit_code, "harness failed")
+            secs = int_or_none(result.get("secs"))
+            # The text header has always shown a non-numeric exit as-is; keep that byte for byte.
+            try:
+                display_code = int(raw)
+            except (TypeError, ValueError):
+                display_code = str(raw)
+            took = duration(result.get("secs"))
+            run_display = {
+                "exit": f"exit {display_code} ({EXIT_MEANING.get(display_code, 'harness failed')})",
+                "took": f" · {took}" if took else "",
+            }
+        else:
+            run_display = {"exit": "exit ?", "took": ""}
+
+        responses = usage.get("responses", 0) if isinstance(usage, dict) else 0
+        cost = number(usage.get("cost")) if isinstance(usage, dict) else 0.0
+
+        total = 0.0
+        for path in glob.glob(os.path.join(runs_dir, "run-*.usage.json")):
+            data = load_json(path)
+            if isinstance(data, dict):
+                total += number(data.get("cost"))
+        count = len(set(nums) | run_numbers(runs_dir, "usage.json"))
+
+        run = {
+            "n": n,
+            "exit": exit_code,
+            "meaning": meaning,
+            "secs": secs,
+            "responses": responses,
+            "cost": cost,
+            "task_total": total,
+            "runs": count,
+        }
+
+    report = load_json(os.path.join(state, "report.json"))
+    valid = isinstance(report, dict)
+    data = {
+        "_run_display": run_display,
+        "task": args.task,
+        "run": run,
+        "report_valid": valid,
+        "status": str_or_none(report.get("status")) if valid else None,
+        "summary": str_or_none(report.get("summary")) if valid else None,
+        "blocking": text_list(report.get("open_questions")) if valid else [],
+        "assumed": text_list(report.get("assumptions")) if valid else [],
+        "outside_scope_needed": text_list(report.get("out_of_scope_needed")) if valid else [],
+    }
+    if valid:
+        data["_status_line"] = f"{report.get('status', '')}: {report.get('summary', '')}"
+
+    changed = changed_files(args.worktree, args.base)
+    generated_globs = args.generated.split()
+    for f in changed:
+        f["generated"] = is_generated(f["path"], generated_globs)
+
+    paths = spec_paths(args.spec)
+    if paths is None:
+        outside = []
+    else:
+        outside = [f["path"] for f in changed
+                   if not f["generated"] and not covered(f["path"], paths, args.worktree)]
+    data["paths"] = {"checked": paths is not None, "outside": outside}
+
+    worker_checks = None
+    acceptance = None
+    if valid:
+        checks = report.get("checks") or []
+        if isinstance(checks, list) and checks:
+            passed = sum(1 for c in checks if isinstance(c, dict) and c.get("result") == "pass")
+            failing = [str(c.get("command", "")) for c in checks
+                       if isinstance(c, dict) and c.get("result") == "fail"]
+            worker_checks = {"pass": passed, "fail": len(failing), "failing": failing}
+        if "acceptance" in report and isinstance(report.get("acceptance"), list):
+            rows = report["acceptance"]
+            met = sum(1 for a in rows if isinstance(a, dict) and a.get("met") is True)
+            unmet = [str(a.get("item", "")) for a in rows
+                     if isinstance(a, dict) and a.get("met") is not True]
+            acceptance = {"met": met, "total": len(rows), "unmet": unmet}
+    data["worker_checks"] = worker_checks
+    data["acceptance"] = acceptance
+
+    configured = [line.strip() for line in args.checks.splitlines() if line.strip()]
+    proofs = read_proofs(state)
+    manual = [str(r.get("manual", "")) for r in proofs
+              if "manual" in r and r.get("tree") == args.tree]
+    last = {}
+    for row in proofs:
+        if row.get("tree") == args.tree and row.get("check") in configured:
+            last[row.get("check")] = row
+    proof_checks = []
+    for command in configured:
+        row = last.get(command)
+        if row is None:
+            state_label = "not run"
+        elif row.get("exit") == 0:
+            state_label = "pass"
+        else:
+            state_label = "fail"
+        proof_checks.append({"check": command, "state": state_label})
+    data["proofs"] = {"tree": args.tree, "checks": proof_checks, "manual": manual}
+
+    ranked = sorted(changed, key=lambda f: (-(f["added"] + f["removed"]), f["path"]))
+    data["diff"] = {
+        "files": len(changed),
+        "added": sum(f["added"] for f in changed),
+        "removed": sum(f["removed"] for f in changed),
+        "generated": sum(1 for f in changed if f["generated"]),
+        "list": [{"path": f["path"], "added": f["added"], "removed": f["removed"],
+                  "generated": f["generated"]} for f in ranked],
+    }
+    return data
+
+
+def render_text(data):
+    task = data["task"]
+    run = data["run"]
+    if run is None:
+        print(f"{task} · no worker runs")
+    else:
+        display = data["_run_display"]
+        count = run["runs"]
+        print(f"{task} · run {run['n']} {display['exit']}{display['took']} · {run['responses']} responses · "
+              f"${run['cost']:.4f} (task total: ${run['task_total']:.4f}, {count} run{'' if count == 1 else 's'})")
+
+    if not data["report_valid"]:
+        print(f"{'status':<10}no valid report")
+    else:
+        print(f"{'status':<10}{data['_status_line']}")
+        blocking = data["blocking"]
+        if blocking:
+            print(f"BLOCKING ({len(blocking)})")
+            for i, item in enumerate(blocking, 1):
+                print(f"  {i}. {item}")
+        assumed = data["assumed"]
+        if assumed:
+            print(f"assumed ({len(assumed)})")
+            for i, item in enumerate(assumed, 1):
+                print(f"  {i}. {item}")
+        outside_scope = data["outside_scope_needed"]
+        if outside_scope:
+            print(f"outside scope needed ({len(outside_scope)})")
+            for item in outside_scope:
+                print(f"  - {item}")
+
+    paths = data["paths"]
+    if not paths["checked"]:
+        print(f"{'paths':<10}not checked (no Owns/Touches in the spec)")
+    elif paths["outside"]:
+        print(f"OUTSIDE PATHS ({len(paths['outside'])}): changed files the spec's Owns/Touches do not cover")
+        for path in paths["outside"]:
+            print(f"  {path}")
+    else:
+        print(f"{'paths':<10}all inside Owns/Touches.")
+
+    worker_checks = data["worker_checks"]
+    if worker_checks is not None:
+        print(f"{'worker checks':<15}{worker_checks['pass']} pass, {worker_checks['fail']} fail")
+        for command in worker_checks["failing"]:
+            print(f"  fail: {command}")
+    acceptance = data["acceptance"]
+    if acceptance is not None:
+        print(f"{'acceptance':<15}{acceptance['met']}/{acceptance['total']} met")
+        for item in acceptance["unmet"]:
+            print(f"  unmet: {item}")
+
+    proofs = data["proofs"]
+    if not proofs["checks"] and not proofs["manual"]:
+        print(f"{'proofs':<15}none configured")
+    else:
+        print(f"{'proofs':<15}(tree {proofs['tree'][:12]})")
+        labels = {"pass": "pass", "fail": "FAIL", "not run": "not run"}
+        for row in proofs["checks"]:
+            print(f"  {labels[row['state']]:<7}  {row['check']}")
+        for text in proofs["manual"]:
+            print(f"  {'manual':<7}  {text}")
+
+    diff = data["diff"]
+    if diff["files"]:
+        print(f"{'diff':<15}{diff['files']} files · +{diff['added']} −{diff['removed']} · "
+              f"{diff['generated']} generated")
+        for f in diff["list"][:12]:
+            payload = f"+{f['added']} −{f['removed']}"
+            suffix = " (generated)" if f["generated"] else ""
+            print(f"  {payload:<11}{f['path']}{suffix}")
+        if len(diff["list"]) > 12:
+            print(f"  … and {len(diff['list']) - 12} more")
+
+    print(f"{'next':<10}orchestra-worker diff {task} · prove {task} · land {task}")
+
+
+PUBLIC_KEYS = ("task", "run", "report_valid", "status", "summary", "blocking", "assumed",
+               "outside_scope_needed", "paths", "worker_checks", "acceptance", "proofs", "diff")
+
+
+def render_json(data):
+    print(json.dumps({key: data[key] for key in PUBLIC_KEYS}, indent=1))
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="review.py")
     ap.add_argument("--task", required=True)
@@ -223,108 +426,20 @@ def main(argv):
     ap.add_argument("--generated", default="")
     ap.add_argument("--checks", default="")
     ap.add_argument("--tree", required=True)
+    ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
     worktree = os.path.abspath(args.worktree)
     if not os.path.isdir(worktree):
         return fail(f"no worktree at {args.worktree}")
+    args.worktree = worktree
     state = os.path.join(worktree, ".orchestra")
 
-    header(args.task, state)
-
-    report = load_json(os.path.join(state, "report.json"))
-    if not isinstance(report, dict):
-        print(f"{'status':<10}no valid report")
-        report = None
+    data = collect(args, state)
+    if args.json:
+        render_json(data)
     else:
-        print(f"{'status':<10}{report.get('status', '')}: {report.get('summary', '')}")
-        blocking = report.get("open_questions") or []
-        if isinstance(blocking, list) and blocking:
-            print(f"BLOCKING ({len(blocking)})")
-            for i, item in enumerate(blocking, 1):
-                print(f"  {i}. {item}")
-        assumed = report.get("assumptions") or []
-        if isinstance(assumed, list) and assumed:
-            print(f"assumed ({len(assumed)})")
-            for i, item in enumerate(assumed, 1):
-                print(f"  {i}. {item}")
-        outside_scope = report.get("out_of_scope_needed") or []
-        if isinstance(outside_scope, list) and outside_scope:
-            print(f"outside scope needed ({len(outside_scope)})")
-            for item in outside_scope:
-                print(f"  - {item}")
-
-    changed = changed_files(worktree, args.base)
-    generated_globs = args.generated.split()
-    for f in changed:
-        f["generated"] = is_generated(f["path"], generated_globs)
-
-    paths = spec_paths(args.spec)
-    if paths is None:
-        print(f"{'paths':<10}not checked (no Owns/Touches in the spec)")
-    else:
-        outside = [f["path"] for f in changed
-                   if not f["generated"] and not covered(f["path"], paths, worktree)]
-        if outside:
-            print(f"OUTSIDE PATHS ({len(outside)}): changed files the spec's Owns/Touches do not cover")
-            for path in outside:
-                print(f"  {path}")
-        else:
-            print(f"{'paths':<10}all inside Owns/Touches.")
-
-    if report is not None:
-        checks = report.get("checks") or []
-        if isinstance(checks, list) and checks:
-            passed = sum(1 for c in checks if isinstance(c, dict) and c.get("result") == "pass")
-            failed = [c for c in checks if isinstance(c, dict) and c.get("result") == "fail"]
-            print(f"{'worker checks':<15}{passed} pass, {len(failed)} fail")
-            for c in failed:
-                print(f"  fail: {c.get('command', '')}")
-        if "acceptance" in report and isinstance(report.get("acceptance"), list):
-            acceptance = report["acceptance"]
-            met = sum(1 for a in acceptance if isinstance(a, dict) and a.get("met") is True)
-            print(f"{'acceptance':<15}{met}/{len(acceptance)} met")
-            for a in acceptance:
-                if isinstance(a, dict) and a.get("met") is not True:
-                    print(f"  unmet: {a.get('item', '')}")
-
-    checks = [line.strip() for line in args.checks.splitlines() if line.strip()]
-    proofs = read_proofs(state)
-    manual = [r for r in proofs if "manual" in r and r.get("tree") == args.tree]
-    if not checks and not manual:
-        print(f"{'proofs':<15}none configured")
-    else:
-        print(f"{'proofs':<15}(tree {args.tree[:12]})")
-        last = {}
-        for row in proofs:
-            if row.get("tree") == args.tree and row.get("check") in checks:
-                last[row.get("check")] = row
-        for command in checks:
-            row = last.get(command)
-            if row is None:
-                label = "not run"
-            elif row.get("exit") == 0:
-                label = "pass"
-            else:
-                label = "FAIL"
-            print(f"  {label:<7}  {command}")
-        for row in manual:
-            print(f"  {'manual':<7}  {row.get('manual', '')}")
-
-    if changed:
-        total_add = sum(f["add"] for f in changed)
-        total_del = sum(f["del"] for f in changed)
-        generated = sum(1 for f in changed if f["generated"])
-        print(f"{'diff':<15}{len(changed)} files · +{total_add} −{total_del} · {generated} generated")
-        ranked = sorted(changed, key=lambda f: (-(f["add"] + f["del"]), f["path"]))
-        for f in ranked[:12]:
-            payload = f"+{f['add']} −{f['del']}"
-            suffix = " (generated)" if f["generated"] else ""
-            print(f"  {payload:<11}{f['path']}{suffix}")
-        if len(ranked) > 12:
-            print(f"  … and {len(ranked) - 12} more")
-
-    print(f"{'next':<10}orchestra-worker diff {args.task} · prove {args.task} · land {args.task}")
+        render_text(data)
     return 0
 
 

@@ -9,7 +9,7 @@
 #   orchestra-worker status [--json] [--prune] [--worktree <dir>]
 #                                             what is running now, and what died silently (--prune clears those)
 #   orchestra-worker watch [<task-id>]        live view of running workers: what each one is doing right now
-#   orchestra-worker review <task-id>         one-screen digest of a finished run: questions, paths, proofs, diff
+#   orchestra-worker review <task-id> [--json]  one-screen digest of a finished run: questions, paths, proofs, diff
 #   orchestra-worker scout <task-id> --spec <file>
 #                                             read-only worker maps a draft spec to the code (where things live)
 #   orchestra-worker clean [--yes] [--include-squashed]
@@ -544,13 +544,19 @@ cmd_watch() {
 
 # cmd_review: everything the orchestrator reads first, on one screen (lib/review.py). No model, read-only.
 cmd_review() {
-  local here=$1; shift; local task="" wt=""
-  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
-  [ -n "$task" ] || die "usage: orchestra-worker review <task-id> [--worktree <dir>]"
+  local here=$1; shift; local task="" wt="" json=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --worktree) wt=${2:?}; shift 2 ;;
+    --json) json=1; shift ;;
+    -*) die "unknown option $1" ;;
+    *) task=$1; shift ;;
+  esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker review <task-id> [--json] [--worktree <dir>]"
   local repo state; task_setup "$task" "$wt"
+  local -a extra=(); [ "$json" = 1 ] && extra=(--json)
   python3 -I "$here/lib/review.py" --task "$task" --worktree "$wt" --base "$ORCHESTRA_BASE" \
     --spec "$(spec_file "$wt" "$task")" --generated "$ORCHESTRA_GENERATED" --checks "$(checks "$wt" "$task")" \
-    --tree "$(work_tree "$wt")"
+    --tree "$(work_tree "$wt")" "${extra[@]}"
 }
 
 # cmd_clean: remove the worktrees of tasks that have landed (lib/clean.py decides which; it only lists without --yes).

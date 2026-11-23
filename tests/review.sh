@@ -23,6 +23,25 @@ run_review() {
   return "$rc"
 }
 
+# run_review_json: same as run_review, with --json. The object lands in $TMP/json.
+run_review_json() {
+  ( cd "$REPO" && ORCHESTRA_BASE=main ORCHESTRA_GATE='true' "$WORKER" review R1 --json ) \
+    > "$TMP/json" 2> "$TMP/err"
+  local rc=$?
+  if [ "$rc" = 0 ]; then ok "review --json exits 0"; else bad "review --json exits $rc"; sed 's/^/     /' "$TMP/err"; fi
+  return "$rc"
+}
+
+# json_check: parse $TMP/json and assert a Python expression over `d`.
+json_check() {
+  if python3 -I - "$TMP/json" "$2" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert eval(sys.argv[2])
+PY
+  then ok "$1"; else bad "$1: JSON assertion '$2' failed"; sed 's/^/     /' "$TMP/json"; fi
+}
+
 # current_tree: the same tree hash work_tree uses (all tracked and untracked files, real index untouched).
 current_tree() {
   local wt=$1 idx tree rc
@@ -114,6 +133,16 @@ line_has "assumption text" "  1. Used the existing greeting helper."
 has "outside scope needed" "outside scope needed (1)"
 line_has "outside scope text" "  - docs need updating"
 
+# 2b. The --json object carries the same digest for editor widgets.
+run_review_json || true
+json_check "--json parses" 'd["task"] == "R1"'
+json_check "--json has every key" 'set(d) == {"task", "run", "report_valid", "status", "summary", "blocking", "assumed", "outside_scope_needed", "paths", "worker_checks", "acceptance", "proofs", "diff"} and set(d["run"]) == {"n", "exit", "meaning", "secs", "responses", "cost", "task_total", "runs"} and set(d["paths"]) == {"checked", "outside"} and set(d["proofs"]) == {"tree", "checks", "manual"} and set(d["diff"]) == {"files", "added", "removed", "generated", "list"}'
+json_check "--json blocking texts" 'd["blocking"] == ["Is the greeting name fixed?", "Should the greeting be localised?"]'
+json_check "--json assumption text" 'd["assumed"] == ["Used the existing greeting helper."]'
+json_check "--json outside path" 'd["paths"]["outside"] == ["other/x.py"]'
+json_check "--json run exit and secs" 'd["run"]["exit"] == 0 and d["run"]["secs"] == 65'
+json_check "--json marks the generated file" 'any(f["path"] == "view_templ.go" and f["generated"] for f in d["diff"]["list"])'
+
 # 3. Header: run number, exit meaning, duration, responses and cost; a missing result file says exit ?.
 has "header run and exit" "run 1 exit 0 (ok)"
 has "header duration" "1m05s"
@@ -123,6 +152,8 @@ has "header task total" "task total: \$0.0120, 1 run)"
 mv "$WT/.orchestra/runs/run-1.result.json" "$TMP/run-1.result.json"
 run_review || true
 has "missing result shows exit ?" "run 1 exit ?"
+run_review_json || true
+json_check "--json unknown exit is null" 'd["run"]["exit"] is None and d["run"]["meaning"] == ""'
 mv "$TMP/run-1.result.json" "$WT/.orchestra/runs/run-1.result.json"
 
 # 4. Proofs are bound to the exact tree: a current row passes, an old row is not counted, no row is not run.
@@ -157,6 +188,8 @@ delegation: worker
 NOSPEC
 run_review || true
 has "a spec without Owns/Touches is not checked" "paths     not checked (no Owns/Touches in the spec)"
+run_review_json || true
+json_check "--json paths not checked without Owns/Touches" 'd["paths"]["checked"] is False'
 cp "$TMP/R1-spec.md" "$WT/docs/work/tasks/R1-x.md"
 
 # 7. Review is read-only for the worktree's real index.
