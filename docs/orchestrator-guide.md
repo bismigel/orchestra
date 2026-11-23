@@ -11,6 +11,12 @@ from its instruction file (`AGENTS.md`, `CLAUDE.md`) or install the bundled skil
 3. **Make the acceptance runnable by the worker.** Name test commands and test names. Screenshots and manual steps
    are yours, listed separately as orchestrator checks.
 4. **Limit the scope.** Name the paths the worker may change and anything it must not touch.
+5. **Scout it** (anything bigger than a few files): `orchestra-worker scout <id> --spec <draft>`. A read-only worker
+   (the checkout is mounted read-only) checks the draft against the code: where each named thing really lives, the
+   files and tests the spec missed, the pattern to copy, whether the acceptance commands run, and the size. It costs
+   cents and ends with an "add to the spec" block you can paste. You still decide what goes in; the scout only
+   reports. In the first production pilot most open questions were a spec pointing at the wrong file, which is
+   exactly what this catches.
 
 ## Launching
 ```sh
@@ -22,20 +28,30 @@ orchestra-worker status [--json]                                  # what is runn
 Run it as a background command if your agent supports that, so you are notified when it exits, and keep 2-3 workers
 going at most: your review is the bottleneck. Each run is capped by `ORCHESTRA_TIMEOUT`.
 
+A run prints one line per tool call while it works (`T41 03:12 #14 edit internal/web/layout.templ`), a `quiet for`
+line when nothing happened for a minute, and a card when it ends: exit meaning, time, cost, blocking questions
+first. You do not need to read that output while it runs; the person watching does. `ORCHESTRA_PROGRESS=0` turns the
+lines off.
+
 ## Is it still running?
 `orchestra-worker status` answers that, and nothing else should be used to guess: it reads a per-run state file and
 checks the pid, so a worker that was killed, OOM-ed or timeout-ed shows as **stale** rather than as a run that is
-quietly still going. A stale row names the file to delete and the task to re-run. `--json` exists for a UI: an
-editor can poll it and show the count and elapsed time while you do something else.
+quietly still going. For a live run it also shows tool calls, cost so far and what the worker is doing now (`quiet
+5m` when no event arrived for a while: a long command, or stuck). `orchestra-worker watch` is the same view, redrawn
+every two seconds with each worker's last actions, for a person to keep open in a terminal. `--json` feeds editor
+widgets ([examples/pi/workers.ts](../examples/pi/workers.ts)).
 
 ## Reviewing a finished run
 Exit codes: `0` ran and reported · `3` a disallowed model answered: discard the run · `4` no valid report ·
 `124` timed out · other: the harness failed (read `.orchestra/runs/run-N.err`).
 
 Then, in this order:
-1. Read `.orchestra/report.json`, especially `open_questions` and `out_of_scope_needed`: decide each open question.
-2. Read the whole diff: `orchestra-worker diff <task>` (generated files appear only in the stat). Check it stays
-   inside the task's paths.
+1. `orchestra-worker review <task>`: one screen with how the run ended, **blocking** questions (decide each one),
+   **assumed** calls (skim: small choices the worker made where the spec was silent), files changed **outside** the
+   spec's Owns/Touches, the worker's claimed checks, which proofs hold for this exact code, and a ranked diff stat.
+   Start here instead of reading the report, the diff and the proofs separately.
+2. Read the whole diff: `orchestra-worker diff <task>` (generated files appear only in the stat). Every file the
+   review listed as outside the paths needs a reason.
 3. Run the checks yourself: `orchestra-worker prove <task>`. Do not reuse the worker's results: its report is a
    claim, a proof is evidence ([docs/proofs.md](proofs.md)).
 4. **Probe.** For anything touching data, privacy, security or money, write a throwaway test with your own inputs,
@@ -52,6 +68,11 @@ Workers cannot commit. `orchestra-worker land <task>` does it for you: it commit
 `ORCHESTRA_BASE`, squashes (claim and wip commits are dropped; a message written on the branch is kept), proves the
 result, and pushes with `ORCHESTRA_PUSH_CMD` only if every check passes, adding `Proof:` trailers. Record the task's
 cost from `orchestra-worker summary` if you track it.
+
+Worktrees of landed tasks are clutter. `orchestra-worker clean` lists them with the reason (landed, squash-landed,
+dirty, running, open); `--yes` removes the landed ones with `git worktree remove` (never forced, never a branch).
+Squash-merged tasks (landed through a pull request) need `--include-squashed`; a worktree with uncommitted work or a
+live run is never removed.
 
 **Squash by rebasing, never by resetting a stale worktree.** A worktree is a snapshot of when the task started; a
 `git reset --soft origin/main` from it silently reverts every file that changed on `main` since. `land` rebases

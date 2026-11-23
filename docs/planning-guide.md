@@ -37,7 +37,8 @@ Number every element that matters and map each number to a story and any rule. A
 command transcripts instead. **Checkpoint:** the human has looked at them (send the file path or a preview link).
 
 ### 4. Decompose
-Turn stories into tasks of one worker run each (rule of thumb ≤ 8 files, ≤ 400 changed lines). For each: delegation
+Turn stories into tasks of one worker run each (rule of thumb ≤ 8 files, ≤ 400 changed lines; a scout's `size`
+estimate tells you when a draft is over). For each: delegation
 class, Owns (disjoint unless chained), Touches with rules, decisions, worker-runnable acceptance, orchestrator checks,
 out of scope. Group into waves; chain tasks that must edit the same file. Contracts (shared interfaces, schema,
 deploy config) get their own tasks done by the orchestrator first.
@@ -51,6 +52,11 @@ is done when the first wave is ready and `orchestra-task lint` passes.
 task that came back with open questions.
 
 1. Run `orchestra-task lint <ids>` and fix everything it reports (the mechanical half).
+   Then **scout** each task beyond a few files: `orchestra-worker scout <id> --spec <task file>`. A read-only worker
+   reads the spec against the code and reports where the things it names really live, files and tests the spec
+   missed, the pattern to copy, whether the acceptance commands run, and the size, ending with a block to paste
+   into Touches. This is the legwork behind the "paths", "tests" and "fits one run" checks below; delegating it costs
+   cents, and you keep the judgment of what to accept.
 2. For each task, check the judgment half of the **definition of ready**:
    - The goal states the **user-visible result** (what changes for the person using it), not only markup or code.
    - **Every decision** the task needs is written as a rule. Search the spec for "should", "maybe", "or", "decide",
@@ -67,6 +73,14 @@ task that came back with open questions.
 3. Read `docs/work/lessons.md` and apply every rule that fits.
 4. Output per task: the rewritten spec, **ready / not ready**, and the decisions still needed, asked as questions with
    a recommended answer. Set `status: ready` only when it is.
+
+## What workers can do during planning
+Planning is judgment, but plenty of it is legwork a worker does for cents. Delegate:
+- **Scouting** a draft spec (`orchestra-worker scout`): paths, call sites, affected tests, patterns, commands, size.
+- **Filling task skeletons** from an outline you wrote: front matter, sections, Owns/Touches from the scout's
+  paste block, test files for test rows you wrote (as a normal `worker` task on the task files).
+- **Mechanical lint fixes** across many task files, BOARD.md updates, status docs.
+Keep: the brief, decisions, scope and MVP line, classification, risky test rows, lessons.
 
 ## After each landed task
 Add a line to `docs/work/lessons.md` for every spec gap the review found: what the spec missed, and the rule that

@@ -1,7 +1,8 @@
 // workers: show what orchestra is doing right now, in the footer and one widget, so an orchestrator never has to
 // guess whether a worker is still running.
 //
-// It reads `orchestra-worker status --json` (orchestra 0.4.0) — one call, no log parsing. The state file it reads
+// It reads `orchestra-worker status --json` (orchestra 0.4.0; 0.5.0 adds tool calls, cost and the current action) —
+// one call, no log parsing. The state file it reads
 // is written by orchestra and removed on every exit path, so a run that died without cleaning up shows as `stale`
 // instead of quietly looking alive. That distinction is the whole point: waiting on a dead run is the failure mode
 // this exists to prevent.
@@ -59,7 +60,13 @@ export default function (pi) {
 
     const lines = [ctx.ui.theme.fg("accent", `orchestra · ${head}`)];
     for (const r of running) {
-      lines.push(`  ${r.task.padEnd(6)} ${dur(r.elapsed_seconds).padStart(7)}  ${r.model || ""}  ${r.profile || ""}`);
+      // orchestra 0.5: tool calls, cost so far and the current action (absent on older versions: shown as blanks).
+      const task = r.kind === "scout" ? `${r.task}·scout` : r.task;
+      const tools = r.tool_calls != null ? `${r.tool_calls} tools` : "";
+      const cost = r.cost != null ? `$${r.cost.toFixed(3)}` : "";
+      let now = r.last_action || "";
+      if (r.quiet_seconds != null && r.quiet_seconds >= 120) now = ctx.ui.theme.fg("warning", `quiet ${dur(r.quiet_seconds)}`) + (now ? ` · ${now}` : "");
+      lines.push(`  ${task.padEnd(8)} ${dur(r.elapsed_seconds).padStart(7)}  ${tools.padStart(9)} ${cost.padStart(7)}  ${now.slice(0, 70)}`);
     }
     for (const r of stale) {
       lines.push(
@@ -111,7 +118,11 @@ export default function (pi) {
       const stale = last.runs.filter((r) => r.state === "stale");
       if (!running.length && !stale.length) return ctx.ui.notify("no orchestra runs", "info");
       for (const r of running)
-        ctx.ui.notify(`${r.task} running ${dur(r.elapsed_seconds)} · run ${r.run} · ${r.model}`, "info");
+        ctx.ui.notify(
+          `${r.task} running ${dur(r.elapsed_seconds)} · run ${r.run} · ${r.model}` +
+            (r.last_action ? ` · now: ${r.last_action}` : ""),
+          "info",
+        );
       for (const r of stale)
         ctx.ui.notify(`${r.task} STALE (pid ${r.pid} gone) — /workers clean removes these`, "warning");
     },

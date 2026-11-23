@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 (2026-11-23)
+Why: [proposals/0003](docs/proposals/0003-scout-review-progress.md) (evidence from 19 production runs).
+- **`orchestra-worker scout <id> --spec <draft>`**: a read-only worker checks a draft spec against the code and
+  reports real paths, files and tests the spec missed, patterns, broken commands and size, with a block to paste
+  into Touches. The checkout and git are mounted read-only; its output is `<repo>-worktrees/.scout/<id>/scout.json`.
+- **`orchestra-worker review <id>`**: one-screen digest of a run: exit meaning, blocking questions, assumptions,
+  files outside the spec's Owns/Touches, worker checks, proofs for the exact tree, ranked diff stat.
+- **Report**: optional `assumptions` (small calls the worker made); `open_questions` now means blocking only.
+- **Live progress**: one line per tool call while a run works, a quiet line after a minute, a finish card with
+  blocking questions first. `status` shows tool calls, cost so far and the current action; `watch` redraws it every
+  2 s. Harnesses opt in with `lib/harness/<name>_progress.py` (pi has one). `ORCHESTRA_PROGRESS=0` turns it off.
+- **`orchestra-worker clean [--yes] [--include-squashed]`**: removes worktrees of landed tasks; never dirty or
+  running ones, never forced, never a branch.
+- **Ops**: two skills (`ops-change`, `ops-incident`) instead of eight; `install.sh --ops` installs them, and every
+  install removes dangling skill links left by deleted skills.
+- Runs write `runs/run-N.result.json` (exit, seconds); `run.json` records the event log and progress reader.
+- `tests/all.sh` runs every suite; CI now runs all of them (it ran only `tests/run.sh` before).
+
 ## 0.4.0 (2026-11-23)
 - **`orchestra-worker status` (alias `ps`)**: what is running right now, and what *was* running and died.
   `run` writes `<worktree>/.orchestra/run.json` (task, pid, run, model, harness, profile, start time) and removes it
