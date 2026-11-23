@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 (2026-11-23)
+- **`orchestra-worker status` (alias `ps`)**: what is running right now, and what *was* running and died.
+  `run` writes `<worktree>/.orchestra/run.json` (task, pid, run, model, harness, profile, start time) and removes it
+  on every exit path; `status` checks the pid, so a killed or crashed run is reported **stale** instead of looking
+  alive. `--json` for editor plugins and scripts; `--worktree` to ask about one task.
+  The failure this prevents: an orchestrator waiting on a worker that is already gone.
+- Offline suite: 93 checks (`tests/status.sh` adds 7: live pid, dead pid, elapsed formatting, the stderr hint, the
+  JSON shape, and both empty cases).
+
 ## 0.3.0 (2026-11-23)
 - **Proofs** ([docs/proofs.md](docs/proofs.md)): `orchestra-worker prove` runs the landing gate
   (`ORCHESTRA_GATE`) and the spec's `proof:` lines in the worktree, without a model, and records one line per check

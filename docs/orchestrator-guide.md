@@ -17,9 +17,16 @@ from its instruction file (`AGENTS.md`, `CLAUDE.md`) or install the bundled skil
 orchestra-worker run <task-id> --spec path/to/spec.md            # first run
 orchestra-worker run <task-id> --feedback review.md              # next round, same session
 orchestra-worker summary <task-id>                               # status, report and cost so far
+orchestra-worker status [--json]                                  # what is running now, and what died silently
 ```
 Run it as a background command if your agent supports that, so you are notified when it exits, and keep 2-3 workers
 going at most: your review is the bottleneck. Each run is capped by `ORCHESTRA_TIMEOUT`.
+
+## Is it still running?
+`orchestra-worker status` answers that, and nothing else should be used to guess: it reads a per-run state file and
+checks the pid, so a worker that was killed, OOM-ed or timeout-ed shows as **stale** rather than as a run that is
+quietly still going. A stale row names the file to delete and the task to re-run. `--json` exists for a UI: an
+editor can poll it and show the count and elapsed time while you do something else.
 
 ## Reviewing a finished run
 Exit codes: `0` ran and reported · `3` a disallowed model answered: discard the run · `4` no valid report ·

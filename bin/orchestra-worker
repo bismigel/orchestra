@@ -6,6 +6,8 @@
 #   orchestra-worker diff <task-id> [--worktree <dir>] [--stat]     review diff, generated files only in the stat
 #   orchestra-worker prove <task-id> [--worktree <dir>] [--manual "what you checked"]
 #   orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]
+#   orchestra-worker status [--json] [--prune] [--worktree <dir>]
+#                                             what is running now, and what died silently (--prune clears those)
 #
 # prove runs the landing gate and the task's `proof:` checks in the worktree (outside the sandbox) and records one
 # line per check, bound to a hash of the exact code. land rebases, squashes, proves that code and pushes, with
@@ -27,6 +29,7 @@ main() {
     diff) cmd_diff "$here" "$@" ;;
     prove) cmd_prove "$here" "$@" ;;
     land) cmd_land "$here" "$@" ;;
+    status|ps) cmd_status "$here" "$@" ;;
     -h|--help|help|"") sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; return 0 ;;
     *) die "unknown command: $cmd (try: run, summary, diff, prove, land)" ;;
   esac
@@ -62,7 +65,7 @@ load_config() {
   ORCHESTRA_BASE=${ORCHESTRA_BASE:-origin/main}                 # what tasks are reviewed against and land on
   ORCHESTRA_GATE=${ORCHESTRA_GATE:-}                            # the repository's landing gate, one shell command
   ORCHESTRA_TASKS_DIR=${ORCHESTRA_TASKS_DIR:-docs/work/tasks}
-  ORCHESTRA_PUSH_CMD=${ORCHESTRA_PUSH_CMD:-git push origin HEAD:refs/heads/{branch}}
+  ORCHESTRA_PUSH_CMD=${ORCHESTRA_PUSH_CMD:-"git push origin HEAD:refs/heads/{branch}"}
   ORCHESTRA_GENERATED=${ORCHESTRA_GENERATED:-*_templ.go *.pb.go *_gen.go *.gen.go *.min.js *.min.css go.sum package-lock.json yarn.lock pnpm-lock.yaml Cargo.lock poetry.lock uv.lock}
   [ "${ORCHESTRA_NEEDS_MODEL:-1}" = 0 ] && return 0
   [ -n "$ORCHESTRA_MODEL" ] || die "set ORCHESTRA_MODEL (provider/model, e.g. deepseek/deepseek-flash) in config.env"
@@ -183,6 +186,12 @@ print(t)' "$tpl")
   fi
 
   log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, profile $ORCHESTRA_PROFILE, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT"
+  write_run_state "$state" "$task" "$n" "$wt" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS"
+  # The state file outlives this process on every exit path, so it is removed on all of them: normal, timeout
+  # (rc 124) and SIGINT. The path is baked into the trap: the trap runs after this function's locals are out of
+  # scope, where "$state" would be unbound (set -u) and would abort the run.
+  # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
+  trap "rm -f $(printf '%q' "$state/run.json")" EXIT
   local rc=0
   # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
   set +e
@@ -204,6 +213,121 @@ print(t)' "$tpl")
   print_summary "$task" "$state" "$n" "$rc"
   git -C "$wt" status --short | grep -v '^?? \.orchestra/' | head -40 >&2 || true
   return "$rc"
+}
+
+# write_run_state records what is running, so `status` (and an editor widget) can see it without parsing logs.
+# Written by the orchestrator's shell, never by the worker: the sandbox has no write access to this file.
+write_run_state() {
+  local state=$1 task=$2 n=$3 wt=$4 model=$5 harness=$6
+  python3 -I - "$state/run.json" "$task" "$$" "$n" "$wt" "$model" "$harness" "${ORCHESTRA_PROFILE:-dev}" <<'PYSTATE'
+import json, sys, time
+path, task, pid, n, wt, model, harness, profile = sys.argv[1:]
+json.dump({"task": task, "pid": int(pid), "run": int(n), "worktree": wt, "model": model,
+           "harness": harness, "profile": profile, "started": int(time.time()),
+           "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+          open(path, "w"), indent=1)
+PYSTATE
+}
+
+# cmd_status reports every run state file it can find and whether that run is still alive. The pid check is the
+# point: a killed or crashed run leaves the file behind, and reporting it as "running" is how an orchestrator waits
+# forever on nothing.
+cmd_status() {
+  local here=$1; shift; local wt="" json=0 prune=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --json) json=1; shift ;;
+    --prune) prune=1; shift ;;
+    --worktree) wt=${2:?}; shift 2 ;;
+    -*) die "unknown option $1" ;;
+    *) die "status takes no positional arguments" ;;
+  esac; done
+
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
+
+  local -a files=()
+  if [ -n "$wt" ]; then
+    [ -f "$wt/.orchestra/run.json" ] && files+=("$wt/.orchestra/run.json")
+  else
+    local base; base="$(dirname "$repo")/$(basename "$repo")-worktrees"
+    shopt -s nullglob; files=("$base"/*/.orchestra/run.json); shopt -u nullglob
+  fi
+
+  if [ "$prune" = 1 ]; then json=0; fi   # --prune acts, it does not print JSON
+  python3 -I - "$json" "$prune" "${files[@]}" <<'PYSTATUS'
+import json, os, sys, time
+as_json = sys.argv[1] == "1"
+prune = sys.argv[2] == "1"
+now = int(time.time())
+rows = []
+for f in sys.argv[2:]:
+    try:
+        st = json.load(open(f))
+    except (OSError, ValueError):
+        continue
+    pid = int(st.get("pid", 0))
+    alive = False
+    if pid > 0:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except OSError:
+            alive = False
+    rows.append({
+        "task": st.get("task", "?"),
+        "state": "running" if alive else "stale",
+        "elapsed_seconds": max(0, now - int(st.get("started", now))),
+        "run": st.get("run"),
+        "model": st.get("model", ""),
+        "harness": st.get("harness", ""),
+        "profile": st.get("profile", ""),
+        "worktree": st.get("worktree") or f.rsplit("/.orchestra/", 1)[0],
+        "started_at": st.get("started_at", ""),
+        "pid": pid,
+        "_file": f,
+    })
+rows.sort(key=lambda r: (r["state"] != "running", r["task"]))
+
+for r in rows:
+    r["state_file"] = r.pop("_file")
+
+if prune:
+    removed = 0
+    for r in rows:
+        if r["state"] == "stale":
+            try:
+                os.remove(r["state_file"])
+                removed += 1
+            except OSError:
+                pass
+    sys.stderr.write("pruned %d stale run state file(s)\n" % removed)
+    raise SystemExit(0)
+
+
+if as_json:
+    print(json.dumps({"runs": rows, "running": sum(1 for r in rows if r["state"] == "running")}, indent=1))
+    raise SystemExit(0)
+
+if not rows:
+    print("no runs")
+    raise SystemExit(0)
+
+def dur(s):
+    s = int(s); m, s = divmod(s, 60); h, m = divmod(m, 60)
+    if h: return "%dh%02dm" % (h, m)
+    if m: return "%dm%02ds" % (m, s)
+    return "%ds" % s
+
+print("%-6s %-8s %-9s %-4s %-22s %s" % ("TASK", "STATE", "ELAPSED", "RUN", "MODEL", "WORKTREE"))
+for r in rows:
+    print("%-6s %-8s %-9s %-4s %-22s %s" % (r["task"], r["state"], dur(r["elapsed_seconds"]),
+          r["run"] or "", r["model"][:22], r["worktree"]))
+stale = [r for r in rows if r["state"] == "stale"]
+if stale:
+    sys.stderr.write("\n%d stale: the process is gone but its state file was not cleaned up.\n"
+                     "Re-run the task, or delete %s/.orchestra/run.json\n"
+                     % (len(stale), stale[0]["worktree"]))
+PYSTATUS
 }
 
 model_allowed() {
@@ -387,7 +511,7 @@ except OSError: rows = []
 sys.exit(0 if any(r.get("tree") == tree and r.get("check") == check and r.get("exit") == 0 for r in rows) else 1)
 PY
     then echo "PASS  (proven)  $line"; continue; fi
-    local log="$wt/.orchestra/proofs/$(date +%s)-$n.log" t0=$SECONDS rc=0
+    local log t0=$SECONDS rc=0; log="$wt/.orchestra/proofs/$(date +%s)-$n.log"
     if [ -s "$devenv" ]; then (cd "$wt" && bash -c '. "$1" >/dev/null 2>&1; shift; eval "$1"' _ "$devenv" "$line") > "$log" 2>&1 </dev/null || rc=$?
     else (cd "$wt" && bash -c "$line") > "$log" 2>&1 </dev/null || rc=$?; fi
     local secs=$((SECONDS-t0))
@@ -420,7 +544,7 @@ cmd_land() {
   [ -n "$task" ] || die "usage: orchestra-worker land <task-id> [--worktree <dir>] [--message-file <file>]"
   local repo state; task_setup "$task" "$wt"
   [ -z "$msgfile" ] || [ -f "$msgfile" ] || die "message file not found: $msgfile"
-  local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/} attempt
+  local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/}
   [ "$remote" != "$ORCHESTRA_BASE" ] || die "ORCHESTRA_BASE must be <remote>/<branch>"
   local title="" spec; spec=$(spec_file "$wt" "$task")
   [ -n "$spec" ] && title=$(sed -n 's/^title:[[:space:]]*//p' "$spec" | head -1)
@@ -433,7 +557,7 @@ cmd_land() {
       kept=$(mktemp); git -C "$wt" log -1 --format=%B "$c" | grep -v '^Proof: ' > "$kept"; break
     done
   fi
-  for attempt in 1 2; do
+  for _ in 1 2; do   # one retry if the base moved
     git -C "$wt" fetch -q "$remote" || die "fetch failed"
     git -C "$wt" rebase -q "$ORCHESTRA_BASE" >/dev/null 2>&1 || { git -C "$wt" rebase --abort 2>/dev/null; die "rebase onto $ORCHESTRA_BASE has conflicts: resolve them in $wt, then land again"; }
     # Squash onto the base we just rebased on (safe: nothing on the base is behind us, so nothing is reverted).
