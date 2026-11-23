@@ -73,7 +73,14 @@ export default function (pi) {
   const refresh = async (ctx) => {
     const d = await query(process.cwd());
     last = d || { runs: [], running: 0 };
-    render(ctx);
+    // render() touches ctx.ui, which throws if this ctx went stale during the await (a reload/replacement while
+    // the subprocess ran). Catch it and stop the timer instead of letting the rejection crash pi; the new session
+    // restarts the poll with a fresh ctx.
+    try {
+      render(ctx);
+    } catch {
+      stop();
+    }
   };
 
   const start = (ctx) => {
@@ -96,7 +103,6 @@ export default function (pi) {
   pi.on("tool_execution_end", async (_e, ctx) => {
     if (last.running > 0 || /orchestra|worker/.test(String(_e?.toolName || ""))) refresh(ctx);
   });
-
   pi.registerCommand("workers", {
     description: "What orchestra is running now (calls `orchestra-worker status`)",
     handler: async (_args, ctx) => {
