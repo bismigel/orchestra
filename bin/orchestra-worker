@@ -24,7 +24,8 @@
 # Proof: trailers. A worker's report is a claim; a proof is evidence orchestra produced itself (docs/proofs.md).
 #
 # The orchestrator (a stronger model, or you) decides; the worker implements. See docs/design.md.
-# Exit codes: 0 ok · 2 usage/config error · 3 model policy violation · 4 no or invalid report · 124 timeout ·
+# Exit codes: 0 ok · 2 usage/config error · 3 model policy violation · 4 no or invalid report · 5 over budget
+# (ORCHESTRA_MAX_COST) · 124 timeout · 130 interrupted ·
 # anything else: the harness's own exit code.
 set -euo pipefail
 
@@ -201,6 +202,7 @@ print(t)' "$tpl")
     return 0
   fi
 
+  guard_running "$state" "task $task"
   local key=""
   if [ -n "$ORCHESTRA_KEY_ENV" ]; then
     if [ -n "$ORCHESTRA_KEY_CMD" ]; then key=$(bash -c "$ORCHESTRA_KEY_CMD") || die "ORCHESTRA_KEY_CMD failed"
@@ -208,8 +210,9 @@ print(t)' "$tpl")
     [ -n "$key" ] || die "no API key: set ORCHESTRA_KEY_CMD or export $ORCHESTRA_KEY_ENV"
   fi
 
-  log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, profile $ORCHESTRA_PROFILE, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT"
+  log "task $task run $n: harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL, profile $ORCHESTRA_PROFILE, thinking $ORCHESTRA_THINKING, timeout $ORCHESTRA_TIMEOUT${ORCHESTRA_MAX_COST:+, max cost \$$ORCHESTRA_MAX_COST}"
   local progress; progress=$(progress_script "$harness_file")
+  check_budget_setup "$progress"
   write_run_state "$state" "$task" "$n" "$wt" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress"
   # The state file outlives this process on every exit path, so it is removed on all of them: normal, timeout
   # (rc 124) and SIGINT. The path is baked into the trap: the trap runs after this function's locals are out of
@@ -217,22 +220,9 @@ print(t)' "$tpl")
   # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
   trap "rm -f $(printf '%q' "$state/run.json"); egress_stop" EXIT
   egress_start "$out.egress.log"
-  local rc=0 t0=$SECONDS follower=""
-  : > "$out.jsonl"
-  # Live progress: one line per tool call on stderr, so a background run's output shows what the worker is doing.
-  # It only reads the event log; it never talks to the worker. ORCHESTRA_PROGRESS=0 turns it off.
-  if [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] && [ -n "$progress" ]; then
-    python3 -I "$progress" follow "$out.jsonl" --task "$task" --start "$(date +%s)" >&2 & follower=$!
-  fi
-  # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
-  set +e
-  timeout --kill-after=30s "$ORCHESTRA_TIMEOUT" "${sandbox[@]}" "${hargv[@]}" \
-    9< <(printf '%s' "$key") < /dev/null >> "$out.jsonl" 2> "$out.err"  # stdin closed: headless harnesses (pi -p)
-                                                                         # read piped stdin and would wait forever
-  rc=$?
-  set -e
+  local rc=0 t0=$SECONDS
+  launch_worker "$task" "$out" "$progress" "$ORCHESTRA_TIMEOUT"; rc=$LAUNCH_RC
   unset key
-  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null || true; wait "$follower" 2>/dev/null || true; fi
   egress_stop
   local secs=$((SECONDS - t0))
 
@@ -324,6 +314,63 @@ check_fresh() {
   fi
   log "freshness: $wt is $behind commits behind $base; the worker reads the older code"
   return 0
+}
+
+# guard_running <state-dir> <what>: refuse to start a second run on a task that is running now. Two runs would share
+# one worktree, one session and one report. A state file whose process is gone is stale and is removed.
+guard_running() {
+  local f="$1/run.json" pid
+  [ -f "$f" ] || return 0
+  pid=$(python3 -I -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("pid", 0)))' "$f" 2>/dev/null || echo 0)
+  if [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then
+    die "$2 is already running (pid $pid): wait for it, or see orchestra-worker status"
+  fi
+  log "removing stale run state of $2 (pid $pid is gone)"; rm -f "$f"
+}
+
+# check_budget_setup <progress-reader>: ORCHESTRA_MAX_COST (USD per run) is enforced by the progress reader, which
+# sums the cost of each response; without a reader, or with a malformed cap, refuse rather than run uncapped.
+check_budget_setup() {
+  local cap=${ORCHESTRA_MAX_COST:-}
+  [ -n "$cap" ] || return 0
+  [[ $cap =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "ORCHESTRA_MAX_COST must be a number of dollars, like 0.50 (got '$cap')"
+  [ -n "$1" ] || die "ORCHESTRA_MAX_COST needs a harness progress reader (lib/harness/<harness>_progress.py)"
+}
+
+# launch_worker <label> <out> <progress-reader> <timeout>: run the sandboxed harness (the caller's sandbox, hargv and
+# key) with the timeout, live progress and the budget cap. Sets LAUNCH_RC. The worker runs in the background so
+# the budget watcher can stop it; Ctrl-C stops it too (a background job ignores SIGINT on its own).
+launch_worker() {
+  local label=$1 out=$2 progress=$3 limit=$4 follower="" cap=${ORCHESTRA_MAX_COST:-0}
+  : > "$out.jsonl"; rm -f "$out.overbudget"
+  set +e
+  # The key reaches the sandbox through file descriptor 9 as a read-only file, never on a command line or disk.
+  # stdin is closed: headless harnesses (pi -p) read piped stdin and would wait forever.
+  timeout --kill-after=30s "$limit" "${sandbox[@]}" "${hargv[@]}" \
+    9< <(printf '%s' "$key") < /dev/null >> "$out.jsonl" 2> "$out.err" &
+  ORCH_TPID=$!
+  trap launch_interrupted INT TERM
+  # Live progress: one line per tool call on stderr, so a background run's output shows what the worker is doing.
+  # It only reads the event log; it never talks to the worker. ORCHESTRA_PROGRESS=0 turns the lines off.
+  if [ -n "$progress" ] && { [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] || [ "$cap" != 0 ]; }; then
+    local -a fargs=(follow "$out.jsonl" --task "$label" --start "$(date +%s)" --max-cost "$cap" --kill "$ORCH_TPID"
+                    --flag "$out.overbudget")
+    [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] || fargs+=(--quiet)
+    python3 -I "$progress" "${fargs[@]}" >&2 & follower=$!
+  fi
+  wait "$ORCH_TPID"; LAUNCH_RC=$?
+  trap - INT TERM; ORCH_TPID=""
+  # It may already have exited by itself (it saw the end event).
+  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null || true; wait "$follower" 2>/dev/null || true; fi
+  set -e
+  if [ -f "$out.overbudget" ]; then LAUNCH_RC=5; fi
+  return 0
+}
+
+launch_interrupted() {
+  if [ -n "${ORCH_TPID:-}" ]; then kill -TERM "$ORCH_TPID" 2>/dev/null || true; fi
+  log "interrupted: the worker was stopped"
+  exit 130
 }
 
 # progress_script <harness-file>: the harness's optional progress reader (<harness>_progress.py next to the
@@ -624,6 +671,7 @@ total = 0.0
 for p in glob.glob(f"{state}/runs/run-*.usage.json"): total += load(p).get("cost", 0) or 0
 rep = load(f"{state}/report.json")
 meaning = {"0": "ok", "3": "DISALLOWED MODEL: discard the run", "4": "NO VALID REPORT", "124": "TIMED OUT",
+           "5": "OVER BUDGET: stopped at ORCHESTRA_MAX_COST", "130": "INTERRUPTED",
            "-": ""}.get(rc, "harness failed: read the run's .err file")
 took = ""
 if secs:
@@ -807,23 +855,17 @@ print(t)' "$here/prompts/scout.md")
   fi
   log "scout $task: read-only, model $ORCHESTRA_MODEL, timeout ${ORCHESTRA_SCOUT_TIMEOUT:-15m}"
   local progress; progress=$(progress_script "$harness_file")
+  check_budget_setup "$progress"
+  guard_running "$state" "scout $task"
   write_run_state "$state" "$task" "$n" "$repo" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress" scout
   # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
   trap "rm -f $(printf '%q' "$state/run.json"); egress_stop" EXIT
   egress_start "$out.egress.log"
-  local rc=0 follower=""
-  : > "$out.jsonl"
-  if [ "${ORCHESTRA_PROGRESS:-1}" != 0 ] && [ -n "$progress" ]; then
-    python3 -I "$progress" follow "$out.jsonl" --task "scout:$task" --start "$(date +%s)" >&2 & follower=$!
-  fi
-  set +e
-  timeout --kill-after=30s "${ORCHESTRA_SCOUT_TIMEOUT:-15m}" "${sandbox[@]}" "${hargv[@]}" \
-    9< <(printf '%s' "$key") < /dev/null >> "$out.jsonl" 2> "$out.err"
-  rc=$?
-  set -e
+  local rc=0
+  launch_worker "scout:$task" "$out" "$progress" "${ORCHESTRA_SCOUT_TIMEOUT:-15m}"; rc=$LAUNCH_RC
   unset key
-  if [ -n "$follower" ]; then kill -TERM "$follower" 2>/dev/null || true; wait "$follower" 2>/dev/null || true; fi
   egress_stop
+  [ "$rc" != 5 ] || { log "scout stopped: over budget (ORCHESTRA_MAX_COST)"; return 5; }
   local used m bad=""; used=$(harness_models_used "$out.jsonl")
   for m in $used; do model_allowed "$m" || bad="$bad $m"; done
   harness_usage "$out.jsonl" > "$out.usage.json" || echo '{}' > "$out.usage.json"
