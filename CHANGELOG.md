@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 (2026-11-23)
+- **Egress allowlist** (`ORCHESTRA_EGRESS_ALLOW`, issue #2): the sandbox gets a private network (loopback only, no
+  DNS) whose only way out is orchestra's proxy outside the sandbox, which allows `CONNECT` to listed hosts only and
+  logs each attempt (`runs/run-N.egress.log`; the finish card counts them). Fails closed; needs bwrap. See
+  [docs/security.md](docs/security.md). Verified with a real pi worker on DeepSeek.
+- **Stale worktree check** (issue #1): before a first run, a worktree with no work is rebased onto the base, and one
+  with work whose spec changed on the base is refused unless `--allow-stale`.
+- Fix: a run whose worker ended quickly could abort before writing its usage, result and card (the progress
+  follower had already exited; 0.5.0 only).
+- `review`/`prove`: a spec `proof:` line that repeats the gate runs once.
+- Offline suites: 9, 315 checks (`tests/egress.sh`, `tests/freshness.sh` new).
+
 ## 0.5.0 (2026-11-23)
 Why: [proposals/0003](docs/proposals/0003-scout-review-progress.md) (evidence from 19 production runs).
 - **`orchestra-worker scout <id> --spec <draft>`**: a read-only worker checks a draft spec against the code and

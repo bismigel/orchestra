@@ -76,6 +76,13 @@ main() {
   done
   if [ "${modes%% *}" = none ]; then echo "skip bwrap run tests: bubblewrap cannot create namespaces here"; fi
 
+  # The progress follower can exit on its own (it saw the end event) before the run kills it: the run must still
+  # finish, write its usage and result files and print the card.
+  expect_rc 0 "run survives a follower that already exited" env FAKE_MODEL=fake/worker-1 FAKE_END=1 ORCHESTRA_SANDBOX=none "$W" run "fend" --spec spec.md
+  has "the card is printed after an early follower exit" "── fend · run 1 exit 0"
+  has "progress lines were printed" "■ done"
+  if [ -s "$(dirname "$repo")/demo-worktrees/fend/.orchestra/runs/run-1.result.json" ]; then ok "result file written"; else bad "no result file after an early follower exit"; fi
+
   # Profiles: the ops profile picks the ops worker prompt; dev keeps the default one.
   expect_rc 0 "ops profile dry run" env FAKE_MODEL=fake/worker-1 ORCHESTRA_PROFILE=ops "$W" run prof1 --spec spec.md --dry-run
   ( cd "$repo" && git worktree add -q -b orchestra/prof2 "$(dirname "$repo")/demo-worktrees/prof2" HEAD )

@@ -25,6 +25,10 @@ orchestra-worker run <task-id> --feedback review.md              # next round, s
 orchestra-worker summary <task-id>                               # status, report and cost so far
 orchestra-worker status [--json]                                  # what is running now, and what died silently
 ```
+Before a first run, `run` compares the worktree with `ORCHESTRA_BASE`: a worktree with no work yet is rebased onto
+it automatically, while one with work is refused (exit 2) when the task's spec changed on the base, so the worker
+cannot silently read an old spec. Pass `--allow-stale` to go ahead against the older code instead. `--feedback`
+rounds skip the check.
 Run it as a background command if your agent supports that, so you are notified when it exits, and keep 2-3 workers
 going at most: your review is the bottleneck. Each run is capped by `ORCHESTRA_TIMEOUT`.
 
