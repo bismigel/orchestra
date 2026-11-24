@@ -139,7 +139,7 @@ line_has "lessons reminder counts the spec gaps" "lessons   5 spec gap(s): orche
 # 2b. The --json object carries the same digest for editor widgets.
 run_review_json || true
 json_check "--json parses" 'd["task"] == "R1"'
-json_check "--json has every key" 'set(d) == {"task", "run", "report_valid", "status", "summary", "blocking", "assumed", "outside_scope_needed", "paths", "spec_gaps", "worker_checks", "acceptance", "proofs", "diff"} and set(d["run"]) == {"n", "exit", "meaning", "secs", "responses", "cost", "task_total", "runs"} and set(d["paths"]) == {"checked", "outside"} and set(d["proofs"]) == {"tree", "checks", "manual"} and set(d["diff"]) == {"files", "added", "removed", "generated", "list"}'
+json_check "--json has every key" 'set(d) == {"task", "run", "candidate", "report_valid", "status", "summary", "blocking", "assumed", "outside_scope_needed", "paths", "spec_gaps", "worker_checks", "acceptance", "proofs", "diff"} and set(d["run"]) == {"n", "exit", "meaning", "secs", "responses", "cost", "task_total", "runs"} and set(d["paths"]) == {"checked", "outside"} and set(d["proofs"]) == {"tree", "checks", "manual"} and set(d["diff"]) == {"files", "added", "removed", "generated", "list"}'
 json_check "--json blocking texts" 'd["blocking"] == ["Is the greeting name fixed?", "Should the greeting be localised?"]'
 json_check "--json assumption text" 'd["assumed"] == ["Used the existing greeting helper."]'
 json_check "--json outside path" 'd["paths"]["outside"] == ["other/x.py"]'

@@ -14,6 +14,26 @@ One line in `<worktree>/.orchestra/proofs.jsonl`:
 - A **manual proof** records what a person or the orchestrator checked by hand (`--manual "visual check at 400 px"`),
   for checks a command cannot do. It is listed, not enforced.
 
+## The candidate snapshot
+Every successful `prove` (including `prove --manual` and the prove inside `land`) also writes
+`<worktree>/.orchestra/candidate.json`: the exact state it passed on.
+```json
+{"task": "T12", "run": 2, "base": "origin/main", "base_commit": "f072b7f1a2b3…", "tree": "9f3c1a2b4d5e…",
+ "spec": "docs/work/tasks/T12-….md", "spec_tree": "…", "at": "2026-11-23T03:40:00Z"}
+```
+- `run` is the number of run logs in `.orchestra/runs/` (null when there are none). `base` is the `ORCHESTRA_BASE`
+  string, and `base_commit` is what it resolved to when the candidate was written (null when it does not resolve).
+- `tree` is the proof's tree; `spec` and `spec_tree` record which spec described the task (informational: proofs
+  still re-match on the check command string).
+- It is written atomically (a temp file beside it, then a rename), and lives under `.orchestra/`, which is excluded
+  from the tree hash: recording a candidate never invalidates the proof it records.
+
+`review` shows `candidate: run 2, base origin/main, tree 9f3c1a2b4d5e`. When the worktree has changed since, it adds
+`candidate drift: worktree differs from the candidate tree` and the stat of that change, so an orchestrator's own
+small fix (or a rebase) is exactly what it sees, not a surprise in the diff. `land` prints
+`candidate drift: publishing a tree that differs from the candidate` when the tree it is about to prove differs
+from the last candidate; it still re-proves the tree it publishes, and leaves a fresh candidate.
+
 ## Which checks run
 1. `ORCHESTRA_GATE`: the repository's landing gate, one shell command (`make check`, `scripts/ci.sh`).
 2. Every `proof:` line in the task spec, usually in Acceptance:
@@ -26,6 +46,7 @@ Checks run in the worktree with the dev environment from `ORCHESTRA_DEVENV_CMD`,
 ```bash
 orchestra-worker diff  T12            # stat of everything, full diff without generated files (ORCHESTRA_GENERATED)
 orchestra-worker prove T12            # PASS/FAIL one line per check; already-proven checks are not run again
+                                      # (a passing prove writes .orchestra/candidate.json)
 orchestra-worker prove T12 --manual "checked the empty state in a browser"
 orchestra-worker land  T12            # rebase, squash, prove the result, push with Proof: trailers
 ```

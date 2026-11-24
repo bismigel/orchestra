@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 (unreleased)
+- **`prove` records a candidate snapshot** in `.orchestra/candidate.json`: task, run, base and the commit it resolved
+to, the tree hash the proofs bound to, the spec and its blob hash, and the time. `review` shows a `candidate:` line,
+and both `review` (text and `--json`) and `land` report `candidate drift` with a stat when the worktree changed since.
+`land` still re-proves the tree it publishes and leaves a fresh candidate; writing the record never invalidates the
+proof (`.orchestra/` is excluded from the tree hash). `review --json` gains `candidate` (null, or the record plus
+`drift` and `drift_stat`). New offline suite: `tests/candidate.sh`.
+
 ## 0.7.0 (2026-11-23)
 Why: [proposals/0004](docs/proposals/0004-skill-gaps.md).
 - **Bug (0.6.0 and earlier): stopping `orchestra-worker` left the worker running** until its timeout. The worker is

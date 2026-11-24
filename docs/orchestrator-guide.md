@@ -63,7 +63,10 @@ Then, in this order:
 1. `orchestra-worker review <task>`: one screen with how the run ended, **blocking** questions (decide each one),
    **assumed** calls (skim: small choices the worker made where the spec was silent), files changed **outside** the
    spec's Owns/Touches, the worker's claimed checks, which proofs hold for this exact code, and a ranked diff stat.
-   Start here instead of reading the report, the diff and the proofs separately.
+   Start here instead of reading the report, the diff and the proofs separately. When a prove passed, it also shows
+   a `candidate:` line (the run, base and tree the proofs bound to). If you changed the worktree yourself, or
+   rebased it, it adds `candidate drift:` with the stat of the difference, so you see exactly what moved since the
+   proof ([docs/proofs.md](proofs.md)).
 2. Read the whole diff: `orchestra-worker diff <task>` (generated files appear only in the stat). Every file the
    review listed as outside the paths needs a reason.
 3. Run the checks yourself: `orchestra-worker prove <task>`. Do not reuse the worker's results: its report is a
@@ -80,8 +83,9 @@ protect data. After about three rounds, take the task over.
 ## Landing
 Workers cannot commit. `orchestra-worker land <task>` does it for you: it commits what is left, rebases onto
 `ORCHESTRA_BASE`, squashes (claim and wip commits are dropped; a message written on the branch is kept), proves the
-result, and pushes with `ORCHESTRA_PUSH_CMD` only if every check passes, adding `Proof:` trailers. Record the task's
-cost from `orchestra-worker summary` if you track it.
+result, and pushes with `ORCHESTRA_PUSH_CMD` only if every check passes, adding `Proof:` trailers. If the worktree
+changed since the last proof, it prints `candidate drift:` with the stat before it re-proves, and the fresh proof is
+what counts. Record the task's cost from `orchestra-worker summary` if you track it.
 
 **Protected base branch** (pull requests required): `orchestra-worker land <task> --pr`, or `ORCHESTRA_LAND=pr`.
 Everything up to the proven, squashed commit is the same; then it pushes that commit to `orchestra/<task>`
