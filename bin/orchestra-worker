@@ -990,6 +990,65 @@ spec_file() {
   return 0   # no spec is fine (the gate still runs); never trip set -e in the caller's assignment
 }
 
+# write_candidate <wt> <task> <tree>: record the exact state a prove passed on in .orchestra/candidate.json, so
+# review and land can show what changed since. Written atomically (a temp file beside it, then mv), and a base that
+# does not resolve is recorded as null rather than failing the write. The file lives under .orchestra/, which is
+# excluded from the tree hash, so writing it does not invalidate the proof it records.
+write_candidate() {
+  local wt=$1 task=$2 tree=$3 state; state="$wt/.orchestra"
+  local spec base=${ORCHESTRA_BASE:-} base_commit="" spec_tree=""
+  spec=$(spec_file "$wt" "$task")
+  if [ -n "$base" ]; then base_commit=$(git -C "$wt" rev-parse -q --verify "$base^{commit}" 2>/dev/null || true); fi
+  if [ -n "$spec" ]; then spec_tree=$(git -C "$wt" hash-object "$spec" 2>/dev/null || true); fi
+  shopt -s nullglob; local -a runs=("$state"/runs/run-*.jsonl); shopt -u nullglob
+  local n=""; [ ${#runs[@]} -gt 0 ] && n=${#runs[@]}
+  python3 -I - "$state/candidate.json" "$task" "$n" "$base" "$base_commit" "$tree" "$spec" "$spec_tree" <<'PYCAND'
+import json, os, sys, tempfile, time
+path, task, run, base, base_commit, tree, spec, spec_tree = sys.argv[1:]
+
+def or_none(value):
+    return value if value != "" else None
+
+try:
+    run = int(run)
+except ValueError:
+    run = None
+record = {"task": task, "run": run, "base": base, "base_commit": or_none(base_commit), "tree": tree,
+          "spec": or_none(spec), "spec_tree": or_none(spec_tree),
+          "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".candidate.", suffix=".tmp")
+with os.fdopen(fd, "w") as f:
+    json.dump(record, f, indent=1); f.write("\n")
+os.replace(tmp, path)
+PYCAND
+}
+
+# candidate_tree <wt> <task>: the tree hash of the last successful prove, or empty when the record is missing,
+# unreadable, or for another task.
+candidate_tree() {
+  python3 -I - "$1/.orchestra/candidate.json" "$2" <<'PYCT'
+import json, sys
+try:
+    record = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    record = None
+if isinstance(record, dict) and record.get("task") == sys.argv[2] and isinstance(record.get("tree"), str):
+    print(record["tree"])
+PYCT
+}
+
+# candidate_drift_notice <wt> <task>: say so when the tree about to be published differs from the last candidate,
+# and show the stat. It never stops the landing: land re-proves the tree it publishes.
+candidate_drift_notice() {
+  local wt=$1 task=$2 cand live
+  cand=$(candidate_tree "$wt" "$task")
+  [ -n "$cand" ] || return 0
+  live=$(work_tree "$wt")
+  [ "$cand" != "$live" ] || return 0
+  echo "candidate drift: publishing a tree that differs from the candidate"
+  git -C "$wt" --no-pager diff --stat=100 "$cand" "$live" 2>/dev/null | sed 's/^/  /' || true
+}
+
 # checks <wt> <task>: the gate, then every `proof:` line of the spec (- proof: `command`), one per line.
 checks() {
   {
@@ -1044,6 +1103,7 @@ PY
     else ok=1; echo "FAIL  (${secs}s, exit $rc)  $line"; tail -n 15 "$log" | sed 's/^/      /'; echo "      full log: $log"; fi
   done < <(checks "$wt" "$task")
   [ "$n" -gt 0 ] || { echo "no checks: set ORCHESTRA_GATE or add \`proof:\` lines to the spec"; return 1; }
+  if [ "$ok" = 0 ]; then write_candidate "$wt" "$task" "$tree"; fi
   echo "tree ${tree:0:12}"
   return $ok
 }
@@ -1054,8 +1114,10 @@ cmd_prove() {
   [ -n "$task" ] || die "usage: orchestra-worker prove <task-id> [--worktree <dir>] [--manual \"what you checked\"]"
   local repo state; task_setup "$task" "$wt"
   if [ -n "$manual" ]; then
+    local tree; tree=$(work_tree "$wt")
     python3 -I -c 'import json,sys,time; print(json.dumps({"manual":sys.argv[1],"tree":sys.argv[2],"at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())}))' \
-      "$manual" "$(work_tree "$wt")" >> "$state/proofs.jsonl"
+      "$manual" "$tree" >> "$state/proofs.jsonl"
+    write_candidate "$wt" "$task" "$tree"
     echo "recorded manual proof: $manual"; return 0
   fi
   prove_all "$wt" "$task"
@@ -1124,6 +1186,7 @@ cmd_land() {
     fi
     [ "$(git -C "$wt" rev-list --count "$ORCHESTRA_BASE..HEAD")" = 1 ] || die "nothing to land for $task"
     echo "changes:"; git -C "$wt" --no-pager diff --stat=100 "$ORCHESTRA_BASE" HEAD | tail -n 12 | sed 's/^/  /'
+    candidate_drift_notice "$wt" "$task"
     prove_all "$wt" "$task" || die "not landed: a check failed (the worktree is rebased and squashed; fix, then land again)"
     # Message: the given file, or "<task>: <title>"; then one Proof: trailer per check and manual proof.
     local msg; msg=$(mktemp)

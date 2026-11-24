@@ -179,6 +179,31 @@ def covered(path, paths, worktree):
     return False
 
 
+# The record `prove` writes: a task, the run count, the base and the tree hash the proofs bound to.
+CANDIDATE_KEYS = ("task", "run", "base", "base_commit", "tree", "spec", "spec_tree", "at")
+
+
+def read_candidate(state, task):
+    """The candidate record, or None when it is missing, unreadable, malformed, not a dict, or another task's."""
+    record = load_json(os.path.join(state, "candidate.json"))
+    if not isinstance(record, dict) or record.get("task") != task:
+        return None
+    return record
+
+
+def candidate_stat(worktree, old_tree, new_tree):
+    """git diff --stat between the candidate tree and the live one, or "" when git cannot produce it."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", worktree, "--no-pager", "diff", "--stat=100", str(old_tree), str(new_tree)],
+            capture_output=True, text=True, check=False)
+    except OSError:
+        return ""
+    if out.returncode != 0:
+        return ""
+    return out.stdout.strip("\n")
+
+
 def read_proofs(state):
     rows = []
     try:
@@ -302,6 +327,16 @@ def collect(args, state):
     data["worker_checks"] = worker_checks
     data["acceptance"] = acceptance
 
+    record = read_candidate(state, args.task)
+    if record is None:
+        candidate = None
+    else:
+        drift = record.get("tree") != args.tree
+        candidate = {key: record.get(key) for key in CANDIDATE_KEYS}
+        candidate["drift"] = drift
+        candidate["drift_stat"] = candidate_stat(args.worktree, record.get("tree"), args.tree) if drift else ""
+    data["candidate"] = candidate
+
     configured = [line.strip() for line in args.checks.splitlines() if line.strip()]
     proofs = read_proofs(state)
     manual = [str(r.get("manual", "")) for r in proofs
@@ -334,6 +369,10 @@ def collect(args, state):
     return data
 
 
+def short_or_dash(value):
+    return "-" if value is None else str(value)[:12]
+
+
 def render_text(data):
     task = data["task"]
     run = data["run"]
@@ -344,6 +383,16 @@ def render_text(data):
         count = run["runs"]
         print(f"{task} · run {run['n']} {display['exit']}{display['took']} · {run['responses']} responses · "
               f"${run['cost']:.4f} (task total: ${run['task_total']:.4f}, {count} run{'' if count == 1 else 's'})")
+
+    candidate = data["candidate"]
+    if candidate is not None:
+        run_text = "-" if candidate["run"] is None else candidate["run"]
+        print(f"candidate: run {run_text}, base {short_or_dash(candidate['base'])}, "
+              f"tree {short_or_dash(candidate['tree'])}")
+        if candidate["drift"]:
+            print("candidate drift: worktree differs from the candidate tree")
+            for line in candidate["drift_stat"].splitlines():
+                print(f"  {line}")
 
     if not data["report_valid"]:
         print(f"{'status':<10}no valid report")
@@ -414,7 +463,7 @@ def render_text(data):
     print(f"{'next':<10}orchestra-worker diff {task} · prove {task} · land {task}")
 
 
-PUBLIC_KEYS = ("task", "run", "report_valid", "status", "summary", "blocking", "assumed",
+PUBLIC_KEYS = ("task", "run", "candidate", "report_valid", "status", "summary", "blocking", "assumed",
                "outside_scope_needed", "paths", "spec_gaps", "worker_checks", "acceptance", "proofs", "diff")
 
 
