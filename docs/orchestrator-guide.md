@@ -93,6 +93,13 @@ Everything up to the proven, squashed commit is the same; then it pushes that co
 installed; `none` to only push). Placeholders `{branch}`, `{base}`, `{title}`, `{body}` expand as variables, so put
 them in double quotes; a title is data, never code.
 
+**Local base** (an integration branch, or a forge you cannot reach yet): set `ORCHESTRA_BASE` to the local branch
+name (`plan/x` counts as local when `plan` is not a configured remote). `land` then skips the fetch, rebases, squashes
+and proves as usual, and moves the branch with a compare-and-swap: if the branch moved while proving, it rebases and
+proves again. When the branch is checked out somewhere, that checkout is fast-forwarded, and only if it has no
+uncommitted changes to tracked files; otherwise land refuses and nothing moves. `--pr` is refused (there is no
+remote). `doctor` says which kind of base you have. Publish the integration branch itself later, normally.
+
 **Record what the spec missed.** `orchestra-worker lessons <task>` turns the run's blocking questions, files outside
 the paths and assumptions into dated draft lines for the lessons file. Keep the ones that would change a future spec,
 write the rule each one needs, and append them: `refine` applies that file to every later task. A lessons file that

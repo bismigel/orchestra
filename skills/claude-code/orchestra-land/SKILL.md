@@ -14,10 +14,10 @@ Land a task only after you reviewed it (the `orchestra` skill, step 4).
    with the repository's gate and the spec's `proof:` lines, and pushes only if every check passes. Add `--pr` when
    the user says "pr" or the base branch is protected: it pushes `orchestra/<id>` and opens a pull request instead.
    Never push by hand, never force the base, never `git reset --soft` from a stale worktree.
-3. **Base not on a remote** (`orchestra-worker doctor` warns "land needs one", e.g. a local integration branch while
-   the forge is unreachable): `prove` it, commit in the worktree with the proof's tree hash in the message
-   (`Proof: tree <hash>, <n> PASS`), stage only the task's paths, and `git cherry-pick` that commit onto the base in
-   the main checkout. Land the base branch itself through the normal path once the remote is back.
+3. **Local base** (an integration branch, or the forge is unreachable): set `ORCHESTRA_BASE` to the local branch and
+   land as usual. `land` moves that branch in place (compare-and-swap, fast-forwarding a clean checkout of it) instead
+   of pushing; `--pr` is refused. A checkout of the base with uncommitted changes makes it refuse: commit or stash
+   first. Publish the integration branch itself later, through the normal path.
 4. **Record.** `orchestra-worker lessons <id>`; append the lines that would change a future spec, with the rule, to
    the repository's lessons file. Then set the task's `status: done` and its board row.
 5. **Report** the commit (or pull request), the proofs, the rounds and the cost (`orchestra-worker summary <id>`).

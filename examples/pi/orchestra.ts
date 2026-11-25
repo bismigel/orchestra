@@ -239,7 +239,8 @@ export default function (pi) {
     description:
       "Land a reviewed task: commit, rebase onto ORCHESTRA_BASE, squash, prove the exact code, then push with " +
       "Proof: trailers (or, with pr=true / ORCHESTRA_LAND=pr, push a branch and open a pull request: for protected " +
-      "branches). Refuses on any failing check. Afterwards: orchestra-worker lessons <task> drafts lessons lines.",
+      "branches). With a local-branch ORCHESTRA_BASE it moves that branch in place instead (no push; pr is refused). " +
+      "Refuses on any failing check. Afterwards: orchestra-worker lessons <task> drafts lessons lines.",
     parameters: Type.Object({
       task: Type.String({ description: "Task id" }),
       pr: Type.Optional(Type.Boolean({ description: "Open a pull request instead of pushing to the base" })),

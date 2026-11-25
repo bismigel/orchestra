@@ -11,6 +11,11 @@ proof (`.orchestra/` is excluded from the tree hash). `review --json` gains `can
   `tokens` (input + output + cache reads), and every task and scout a `tokens` total, so `clean` archives them too.
   `history` adds a `TOKENS` column and a token total; rows archived before this show `-` and are counted as
   "without token data".
+- **`land` onto a local base**: `ORCHESTRA_BASE` may name a local branch (an integration branch, or a forge you cannot
+  reach). `land` skips the fetch, proves as usual, then moves the branch with a compare-and-swap (rebasing and
+  proving again if it moved), fast-forwards a checkout of it only when that checkout is clean, and refuses `--pr`.
+  `doctor` reports a local base as ok instead of warning "land needs one". Skills, the guide and pi's land tool and
+  prompt describe it.
 - **Skills:** a new `orchestra-land` skill for Claude Code (the pi `/land` prompt's steps, plus landing onto a base
   that is not on a remote), and the `orchestra` skill now tells the orchestrator about `candidate:` and
   `candidate drift:` in review and land.

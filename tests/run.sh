@@ -178,6 +178,56 @@ main() {
     bad "a commit title ran as code in the PR command"; else ok "a hostile title is data, not code"; fi
   expect_rc 0 "land --pr with ORCHESTRA_PR_CMD=none just pushes" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_CMD=none "$W" land P3 --pr
   has "without a PR command it says what to do" "open a pull request into main"
+
+  # land onto a local base: no remote at all. The base is moved with a compare-and-swap, a checkout of it is
+  # fast-forwarded only when clean, and --pr is refused.
+  ( set -e
+    cd "$tmp"; mkdir local-land; cd local-land
+    git init -q -b main repo; cd repo
+    git commit -q --allow-empty -m init
+    git branch plan/int
+    for t in L1 L2 L3 L4; do
+      git worktree add -q -b "task/$t" "../repo-worktrees/$t" plan/int
+      ( cd "../repo-worktrees/$t"; echo "$t" > "$t.txt" )
+    done
+  ) >/dev/null 2>&1 && ok "local-land fixture" || bad "local-land fixture"
+  local LL="$tmp/local-land/repo"
+  # the base is not checked out anywhere: the ref moves, nothing is pushed
+  expect_rc 0 "land onto a local base" env -C "$LL" ORCHESTRA_BASE=plan/int ORCHESTRA_GATE=true "$W" land L1
+  has "land says it landed on the local base" "landed L1 on local plan/int"
+  if git -C "$LL" show plan/int:L1.txt >/dev/null 2>&1; then ok "the local base has the task's file"; else bad "the local base did not move"; fi
+  if git -C "$LL" log -1 --format=%B plan/int | grep -q '^Proof: pass'; then ok "local land keeps Proof: trailers"; else bad "no Proof: trailer on the local base"; fi
+  local before; before=$(git -C "$LL" rev-parse plan/int)
+  expect_rc 2 "land --pr is refused on a local base" env -C "$LL" ORCHESTRA_BASE=plan/int ORCHESTRA_GATE=true "$W" land L2 --pr
+  has "the refusal names the reason" "needs a remote base"
+  if [ "$(git -C "$LL" rev-parse plan/int)" = "$before" ]; then ok "a refused --pr leaves the local base alone"; else bad "a refused --pr moved the local base"; fi
+  # the base moves while the task is being proven: compare-and-swap fails, land rebases, proves again, then lands
+  cat > "$tmp/bump.sh" <<BUMP
+[ -e "$tmp/bumped" ] && exit 0
+touch "$tmp/bumped"
+c=\$(git -C "$LL" commit-tree "\$(git -C "$LL" rev-parse 'plan/int^{tree}')" -p plan/int -m "someone else")
+git -C "$LL" update-ref refs/heads/plan/int "\$c"
+BUMP
+  expect_rc 0 "land survives the local base moving mid-prove" env -C "$LL" ORCHESTRA_BASE=plan/int ORCHESTRA_GATE="sh $tmp/bump.sh" "$W" land L4
+  has "land says the base moved" "moved while proving"
+  if git -C "$LL" log --format=%s plan/int | grep -q "someone else" && git -C "$LL" show plan/int:L4.txt >/dev/null 2>&1; then
+    ok "both the other commit and the task are on the base"; else bad "the base lost a commit or the task"; fi
+  # the base is checked out: clean -> fast-forward the checkout; dirty tracked file -> refuse, nothing moves
+  git -C "$LL" checkout -q plan/int
+  echo local-edit >> "$LL/L1.txt"
+  before=$(git -C "$LL" rev-parse plan/int)
+  expect_rc 2 "land refuses a dirty checkout of the base" env -C "$LL" ORCHESTRA_BASE=plan/int ORCHESTRA_GATE=true "$W" land L2
+  has "the refusal names the checkout" "uncommitted changes"
+  if [ "$(git -C "$LL" rev-parse plan/int)" = "$before" ] && grep -q local-edit "$LL/L1.txt"; then
+    ok "a refused land keeps the base and the uncommitted edit"; else bad "a refused land moved the base or lost the edit"; fi
+  git -C "$LL" checkout -q -- L1.txt; echo scratch > "$LL/untracked.txt"
+  expect_rc 0 "land fast-forwards a clean checkout of the base (untracked files allowed)" env -C "$LL" ORCHESTRA_BASE=plan/int ORCHESTRA_GATE=true "$W" land L2
+  if [ -f "$LL/L2.txt" ] && [ -f "$LL/untracked.txt" ] && [ -z "$(git -C "$LL" status --porcelain --untracked-files=no)" ]; then
+    ok "the checkout has the task's file and stays clean"; else bad "the checkout was not fast-forwarded cleanly"; fi
+  expect_rc 0 "land L3 on the checked-out base" env -C "$LL" ORCHESTRA_BASE=plan/int ORCHESTRA_GATE=true "$W" land L3
+  if [ "$(git -C "$LL" rev-parse HEAD)" = "$(git -C "$LL" rev-parse plan/int)" ]; then ok "the checkout follows the base"; else bad "the checkout fell behind the base"; fi
+  # a base that is neither a configured remote's branch nor a local branch still fails as before
+  expect_rc 2 "land refuses a base that is neither remote nor local" env -C "$LL" ORCHESTRA_BASE=nope/x ORCHESTRA_GATE=true "$W" land L3
   echo "---"; echo "$pass passed, $fail failed"
   [ "$fail" = 0 ]
 }
