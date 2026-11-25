@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""orchestra history: every task's runs, cost and outcome, including the tasks `clean` removed.
+"""orchestra history: every task's runs, tokens, cost and outcome, including the tasks `clean` removed.
 
 Live worktrees are read directly; removed ones come from the ledger (`--ledger`, one JSON line per removal, written
 by `clean` before it removes anything). A live task that also has a ledger line shows once, as live.
@@ -77,12 +77,22 @@ def run_records(runs_dir):
         result = load_json(os.path.join(runs_dir, "run-%d.result.json" % n))
         usage = usage if isinstance(usage, dict) else {}
         result = result if isinstance(result, dict) else {}
+        input_tokens = int_or_none(usage.get("input"))
+        output_tokens = int_or_none(usage.get("output"))
+        cache_read = int_or_none(usage.get("cache_read"))
+        tokens = (input_tokens + output_tokens + cache_read
+                  if None not in (input_tokens, output_tokens, cache_read) else None)
         records.append({
             "n": n,
             "exit": int_or_none(result.get("exit")),
             "secs": int_or_none(result.get("secs")),
             "responses": int_or_none(usage.get("responses")) or 0,
             "cost": number(usage.get("cost")),
+            "input": input_tokens,
+            "output": output_tokens,
+            "cache_read": cache_read,
+            "reasoning": int_or_none(usage.get("reasoning")),
+            "tokens": tokens,
         })
     return records
 
@@ -146,6 +156,23 @@ def total_cost(runs):
     return sum(run["cost"] for run in runs)
 
 
+def total_tokens(runs):
+    """The runs' token sum, or None when any run lacks it (or there is no run at all)."""
+    if not runs or any(run.get("tokens") is None for run in runs):
+        return None
+    return sum(run["tokens"] for run in runs)
+
+
+def fmt_tokens(n):
+    if n is None:
+        return "-"
+    if n < 1000:
+        return str(n)
+    if n < 999_500:
+        return "%dk" % int(n / 1000 + 0.5)
+    return "%.1fM" % (n / 1_000_000)
+
+
 def task_record(task, state, removed_at, cls, branch, head):
     """The ledger record for a task worktree; `state` is its .orchestra directory."""
     runs = run_records(os.path.join(state, "runs"))
@@ -158,6 +185,7 @@ def task_record(task, state, removed_at, cls, branch, head):
         "head": head,
         "runs": runs,
         "cost": total_cost(runs),
+        "tokens": total_tokens(runs),
         "report": report_record(state),
         "egress_denied": egress_denied(os.path.join(state, "runs")),
     }
@@ -172,6 +200,7 @@ def scout_record(task, scout_dir, removed_at):
         "removed_at": removed_at,
         "runs": runs,
         "cost": total_cost(runs),
+        "tokens": total_tokens(runs),
     }
 
 
@@ -279,6 +308,7 @@ def cells(row):
         str(row.get("kind", "")),
         str(len(runs)),
         "$%.4f" % number(row.get("cost")),
+        fmt_tokens(row.get("tokens")),
         (str_or_none(report.get("status")) or "-") if report else "-",
         str(len(text_list(report.get("blocking")))) if report else "-",
         str(len(text_list(report.get("assumed")))) if report else "-",
@@ -287,7 +317,7 @@ def cells(row):
 
 
 def table(rows):
-    head = ("TASK", "KIND", "RUNS", "COST", "STATUS", "BLOCKING", "ASSUMED", "WHEN")
+    head = ("TASK", "KIND", "RUNS", "COST", "TOKENS", "STATUS", "BLOCKING", "ASSUMED", "WHEN")
     body = [cells(row) for row in rows]
     padded = len(head) - 1
     widths = [max([len(head[i])] + [len(row[i]) for row in body]) for i in range(padded)]
@@ -301,11 +331,19 @@ def totals(rows):
     runs = sum(len(row.get("runs") or []) for row in rows if isinstance(row.get("runs"), list))
     cost = sum(number(row.get("cost")) for row in rows)
     tasks = sum(1 for row in rows if row.get("kind") == "task")
-    return {"tasks": tasks, "runs": runs, "cost": cost}
+    known = [row.get("tokens") for row in rows if row.get("tokens") is not None]
+    unknown = 0
+    for row in rows:
+        row_runs = row.get("runs")
+        if isinstance(row_runs, list) and any(
+                not isinstance(run, dict) or run.get("tokens") is None for run in row_runs):
+            unknown += 1
+    return {"tasks": tasks, "runs": runs, "cost": cost,
+            "tokens": sum(known), "tokens_unknown": unknown}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="every orchestra task's runs, cost and outcome")
+    parser = argparse.ArgumentParser(description="every orchestra task's runs, tokens, cost and outcome")
     parser.add_argument("--worktrees", required=True, help="the directory holding one worktree per task")
     parser.add_argument("--ledger", required=True, help="the JSON Lines ledger written by clean")
     parser.add_argument("--json", action="store_true", help="print the rows and totals as JSON")
@@ -328,7 +366,11 @@ def main():
         print("no history")
         return 0
     table(rows)
-    print("total: %d tasks, %d runs, $%.4f" % (total["tasks"], total["runs"], total["cost"]))
+    line = "total: %d tasks, %d runs, $%.4f, %s tokens" % (
+        total["tasks"], total["runs"], total["cost"], fmt_tokens(total["tokens"]))
+    if total["tokens_unknown"]:
+        line += " (%d without token data)" % total["tokens_unknown"]
+    print(line)
     return 0
 
 

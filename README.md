@@ -85,7 +85,7 @@ orchestra-worker review hello
    branches). A worker's report is a claim; a proof is a check orchestra ran itself ([docs/proofs.md](docs/proofs.md)).
 6. **Learn**: `orchestra-worker lessons <id>` drafts lines for the lessons file from what the spec missed;
    `orchestra-worker clean` archives and removes landed worktrees; `orchestra-worker history` shows every task's
-   runs and cost.
+   runs, tokens and cost.
 
 One task, end to end:
 ```mermaid
@@ -136,7 +136,7 @@ workers.
 | A looping or confused worker | `ORCHESTRA_MAX_COST` stops the run at your cap (exit 5); `ORCHESTRA_TIMEOUT` bounds the time. Give workers their own API key with a provider-side spend limit |
 | Rediscovering the same spec gap | `orchestra-worker lessons` turns what a review found into rules for the lessons file, which `refine` applies to every later spec |
 | A task too big for one run | Keep tasks to about 8 files or 400 lines; the scout's size estimate says when to split. The one $0.125 run above was a 28-file task |
-| Not knowing what you spent | `orchestra-worker history`: every task's runs and cost, cleaned-up ones included, with the project total |
+| Not knowing what you spent | `orchestra-worker history`: every task's runs, tokens and cost, cleaned-up ones included, with the project total |
 
 Habits that pay off:
 - **Do the small decided fix yourself.** A one-line change you have already decided is cheaper to type than to
@@ -229,7 +229,7 @@ rotation) and `ops-incident`. They are installed only with `./install.sh --ops`.
 | `orchestra-worker prove <id>` | the gate and the spec's `proof:` lines, bound to the exact code |
 | `orchestra-worker land <id>` | rebase, squash, prove, push with `Proof:` trailers (`--pr` for a pull request) |
 | `orchestra-worker lessons <id>` | draft lessons lines from what the spec missed |
-| `orchestra-worker clean` / `history` | archive and remove landed worktrees / every task's runs and cost |
+| `orchestra-worker clean` / `history` | archive and remove landed worktrees / every task's runs, tokens and cost |
 | `orchestra-worker doctor` / `guide <name>` | check the setup / print a guide's path |
 | `orchestra-task lint` | the mechanical half of the definition of ready |
 

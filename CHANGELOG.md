@@ -7,6 +7,10 @@ and both `review` (text and `--json`) and `land` report `candidate drift` with a
 `land` still re-proves the tree it publishes and leaves a fresh candidate; writing the record never invalidates the
 proof (`.orchestra/` is excluded from the tree hash). `review --json` gains `candidate` (null, or the record plus
 `drift` and `drift_stat`). New offline suite: `tests/candidate.sh`.
+- **`history` and the ledger keep tokens**: every run record gains `input`, `output`, `cache_read`, `reasoning` and
+  `tokens` (input + output + cache reads), and every task and scout a `tokens` total, so `clean` archives them too.
+  `history` adds a `TOKENS` column and a token total; rows archived before this show `-` and are counted as
+  "without token data".
 - **Skills:** a new `orchestra-land` skill for Claude Code (the pi `/land` prompt's steps, plus landing onto a base
   that is not on a remote), and the `orchestra` skill now tells the orchestrator about `candidate:` and
   `candidate drift:` in review and land.

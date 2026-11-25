@@ -154,7 +154,7 @@ check "a listing leaves the ledger byte for byte" [ "$(cat "$LEDGER")" = "$BEFOR
 # H3. history shows the cleaned task (dated) and the live one, with the runs and cost of both.
 OUT=$(run_history 2>&1); rc=$?
 check "history exits 0" [ "$rc" = 0 ]
-if head -n1 <<<"$OUT" | grep -qE '^TASK +KIND +RUNS +COST +STATUS +BLOCKING +ASSUMED +WHEN$'; then
+if head -n1 <<<"$OUT" | grep -qE '^TASK +KIND +RUNS +COST +TOKENS +STATUS +BLOCKING +ASSUMED +WHEN$'; then
   ok "the header has the history columns"
 else bad "wrong header: $(head -n1 <<<"$OUT")"; fi
 row_has "A is a cleaned task with 2 runs" A  task  2
@@ -200,9 +200,10 @@ if python3 -I - "$JS" <<'PY'
 import json, sys
 d = json.loads(sys.argv[1])
 assert set(d) == {"rows", "total"}, d
-assert set(d["total"]) == {"tasks", "runs", "cost"}, d["total"]
+assert set(d["total"]) == {"tasks", "runs", "cost", "tokens", "tokens_unknown"}, d["total"]
 assert d["total"]["tasks"] == 2 and d["total"]["runs"] == 4, d["total"]
 assert abs(d["total"]["cost"] - 0.036) < 1e-9, d["total"]
+assert d["total"]["tokens"] == 0 and d["total"]["tokens_unknown"] == 3, d["total"]
 assert len(d["rows"]) == 3, d["rows"]
 assert all(isinstance(r.get("live"), bool) for r in d["rows"]), d["rows"]
 by = {(r["task"], r["kind"]): r for r in d["rows"]}
@@ -249,10 +250,62 @@ if python3 -I - "$JS" <<'PY'
 import json, sys
 d = json.loads(sys.argv[1])
 assert d["rows"] == [], d
-assert d["total"] == {"tasks": 0, "runs": 0, "cost": 0}, d["total"]
+assert d["total"] == {"tasks": 0, "runs": 0, "cost": 0, "tokens": 0, "tokens_unknown": 0}, d["total"]
 print("ok")
 PY
 then ok "empty --json has no rows and zero totals"; else bad "empty --json is wrong: $JS"; fi
+
+# H9. Tokens are kept per run and per task, next to cost.
+mkdir -p "$WT/MIX/.orchestra/runs" "$WT/TOK/.orchestra/runs"
+printf '{"responses":4,"input":1000,"output":200,"cache_read":50000,"reasoning":30,"cost":0.01}\n' \
+  > "$WT/MIX/.orchestra/runs/run-1.usage.json"
+printf '{"responses":2,"cost":0.02}\n' > "$WT/MIX/.orchestra/runs/run-2.usage.json"
+printf '{"responses":1,"input":10,"output":5,"cache_read":0,"cost":0.001}\n' \
+  > "$WT/TOK/.orchestra/runs/run-1.usage.json"
+# A ledger line written before tokens existed: no token fields anywhere.
+printf '%s\n' '{"task":"OLD","kind":"task","removed_at":"2025-01-02T03:04:05Z","class":"landed","branch":"OLD","head":null,"runs":[{"n":1,"exit":0,"secs":5,"responses":3,"cost":0.1}]}' \
+  >> "$LEDGER"
+
+JS=$(run_history --json 2>/dev/null); rc=$?
+check "history --json with token fixtures exits 0" [ "$rc" = 0 ]
+if python3 -I - "$JS" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+by = {(r["task"], r["kind"]): r for r in d["rows"]}
+mix, tok, old = by[("MIX", "task")], by[("TOK", "task")], by[("OLD", "task")]
+first, second = mix["runs"]
+assert first["tokens"] == 51200 and first["reasoning"] == 30, first
+assert (first["input"], first["output"], first["cache_read"]) == (1000, 200, 50000), first
+assert second["input"] is None and second["output"] is None, second
+assert second["cache_read"] is None and second["tokens"] is None, second
+assert mix["tokens"] is None, mix
+assert tok["tokens"] == 15, tok
+assert old.get("tokens") is None and [x["n"] for x in old["runs"]] == [1], old
+assert d["total"]["tokens"] == 15, d["total"]
+assert d["total"]["tokens_unknown"] == 5, d["total"]
+print("ok")
+PY
+then ok "runs keep tokens, reasoning and nulls; rows total or null"; else bad "token --json is wrong: $JS"; fi
+
+OUT=$(run_history 2>/dev/null)
+if head -n1 <<<"$OUT" | grep -qE '^TASK +KIND +RUNS +COST +TOKENS +STATUS +BLOCKING +ASSUMED +WHEN$'; then
+  ok "the header has a TOKENS column after COST"
+else bad "wrong header: $(head -n1 <<<"$OUT")"; fi
+if grep -qE '^MIX +task +2 +\$0\.0300 +- ' <<<"$OUT"; then
+  ok "a task with one untokened run shows -"
+else bad "MIX tokens cell is wrong: $OUT"; fi
+if grep -qE '^TOK +task +1 +\$0\.0010 +15 ' <<<"$OUT"; then
+  ok "a task with 15 tokens shows 15"
+else bad "TOK tokens cell is wrong: $OUT"; fi
+if grep -qE '^OLD +task +1 +\$0\.0000 +- ' <<<"$OUT"; then
+  ok "an old ledger line is listed with unknown tokens"
+else bad "OLD is not listed with '-': $OUT"; fi
+has "the total carries the known tokens and the unknown count" \
+  "total: 6 tasks, 8 runs, \$0.0670, 15 tokens (5 without token data)" "$OUT"
+
+# fmt_tokens rounds as documented, an unknown count as a dash.
+FMT=$(cd "$ROOT" && python3 -I -c 'import sys; sys.path.insert(0,"lib"); import history as h; print(" ".join(h.fmt_tokens(x) for x in [None, 0, 999, 1000, 1499, 1500, 999499, 999500, 121000000]))')
+check "fmt_tokens formats every boundary" [ "$FMT" = "- 0 999 1k 1k 2k 999k 1.0M 121.0M" ]
 
 printf 'history: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
