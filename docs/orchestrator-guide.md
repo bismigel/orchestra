@@ -103,7 +103,7 @@ dirty, running, open); `--yes` removes the landed ones with `git worktree remove
 Squash-merged tasks (landed through a pull request) need `--include-squashed`; a worktree with uncommitted work or a
 live run is never removed. Before removing anything, `clean --yes` archives each task (runs, exit codes, cost,
 questions, denied egress) to a ledger in the git directory; `orchestra-worker history` shows live and archived tasks
-with the project's total spend.
+with their runs, tokens and cost, and the project's total spend.
 
 ## Setup check
 `orchestra-worker doctor` before the first run in a repository, and whenever runs fail in odd ways: config files,
