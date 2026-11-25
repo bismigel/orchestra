@@ -31,12 +31,15 @@ printed by `orchestra-worker guide orchestrator`; the essentials:
    them), **assumed** calls (skim), files outside the spec's paths, claimed checks, proofs for the exact code, diff
    stat. Then the full diff (`orchestra-worker diff <id>`), your own run of the checks (`orchestra-worker prove <id>`;
    a report is a claim, a proof is evidence), and **probes** with your own inputs on anything risky.
+   After a passing prove, `review` shows a `candidate:` line (the run, base and tree the proofs bound to). If you
+   edit or rebase the worktree afterwards it shows `candidate drift:` with the stat: prove again before you land.
    While runs are going, `orchestra-worker status` shows each one's current action; point the user at
    `orchestra-worker watch` if they want a live view.
 5. **Feedback** as a table of failing cases (input, actual, required) plus the rule; after ~3 rounds finish it
    yourself. Small fixes you have already decided: just make them.
-6. **Land**: `orchestra-worker land <id>` (rebase, squash, prove the exact code, push with `Proof:` trailers; it
-   refuses on any failing check). Protected base branch: `orchestra-worker land <id> --pr` pushes a branch and opens
+6. **Land** with the `orchestra-land` skill, or directly: `orchestra-worker land <id>` (rebase, squash, prove the
+   exact code, push with `Proof:` trailers; it refuses on any failing check, and reports `candidate drift:` if the
+   worktree moved since the last proof). Protected base branch: `orchestra-worker land <id> --pr` pushes a branch and opens
    a pull request instead. Tell the user what landed, the rounds and the cost (`orchestra-worker summary <id>`).
    Then **record what the spec missed**: `orchestra-worker lessons <id>` drafts lines from the run's blocking
    questions, outside-path files and assumptions; keep the ones that would change a future spec, write the rule,

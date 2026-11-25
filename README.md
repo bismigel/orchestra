@@ -237,7 +237,7 @@ Exit codes: `0` ok · `2` refused or misconfigured · `3` a disallowed model ans
 `5` over budget · `124` timed out · `130` stopped.
 
 ### Make it the default in Claude Code
-`install.sh` installs the skills (`/orchestra`, `/orchestra-plan`, `/orchestra-refine`). To have every session use
+`install.sh` installs the skills (`/orchestra`, `/orchestra-land`, `/orchestra-plan`, `/orchestra-refine`). To have every session use
 them, add one line to `~/.claude/CLAUDE.md`:
 ```
 - Delegate mechanical coding work with the orchestra skill: I decide and review; workers only implement settled specs.
