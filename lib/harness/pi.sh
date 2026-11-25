@@ -10,10 +10,13 @@ harness_argv() {
   local -n _argv=$1; local task=$2 state=$3 prompt=$4
   command -v pi >/dev/null || die "pi not found on PATH (npm install -g @earendil-works/pi or your package manager)"
   local pi_bin; pi_bin=$(readlink -f "$(command -v pi)")
+  local -a router_ext=()
+  # A virtual model (orchestra/auto) needs exactly this extension loaded; --no-extensions keeps every other one out.
+  [ -n "${ORCHESTRA_ROUTER_EXT:-}" ] && router_ext=(-e "$ORCHESTRA_ROUTER_EXT")
   _argv=("$pi_bin" -p --mode json
     --model "$ORCHESTRA_MODEL" --models "$ORCHESTRA_MODEL" --thinking "$ORCHESTRA_THINKING"
     --session-id "$task" --session-dir "$state/sessions" --name "orchestra worker $task"
-    --no-mcp --no-extensions --no-skills --no-prompt-templates --no-approve
+    --no-mcp --no-extensions "${router_ext[@]}" --no-skills --no-prompt-templates --no-approve
     "$prompt")
 }
 
