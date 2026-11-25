@@ -2,8 +2,10 @@
 # orchestra-worker: run one sandboxed worker agent on one task, then check what it did.
 #
 #   orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>] [--dry-run] [--allow-stale]
+#   orchestra-worker run <task-id> --prompt "<text>" [--worktree <dir>] [--dry-run]
 #   orchestra-worker summary <task-id> [--worktree <dir>]
-#   orchestra-worker diff <task-id> [--worktree <dir>] [--stat]     review diff, generated files only in the stat
+#   orchestra-worker diff <task-id> [--worktree <dir>] [--stat] [--rendered]
+#                                             review diff, generated files only in the stat; --rendered: the render command's diff
 #   orchestra-worker prove <task-id> [--worktree <dir>] [--manual "what you checked"]
 #   orchestra-worker land <task-id> [--pr] [--worktree <dir>] [--message-file <file>]
 #                                             --pr (or ORCHESTRA_LAND=pr): push a branch and open a pull request;
@@ -12,8 +14,11 @@
 #                                             what is running now, and what died silently (--prune clears those)
 #   orchestra-worker watch [<task-id>]        live view of running workers: what each one is doing right now
 #   orchestra-worker review <task-id> [--json]  one-screen digest of a finished run: questions, paths, proofs, diff
-#   orchestra-worker scout <task-id> --spec <file>
+#   orchestra-worker scout <task-id> --spec <file> [--state]
+#   orchestra-worker scout <task-id> --prompt "<text>" [--state]
 #                                             read-only worker maps a draft spec to the code (where things live)
+#   orchestra-worker artifact <task-id> [--local] [--open] [--worktree <dir>] [--out <dir>]
+#                                             collect a task's report, diff and proofs as an artifact
 #   orchestra-worker clean [--yes] [--include-squashed]
 #                                             remove worktrees of landed tasks (lists them without --yes)
 #   orchestra-worker history [--json]         every task's runs, cost and outcome, including cleaned-up ones
@@ -47,6 +52,7 @@ main() {
     watch) cmd_watch "$here" "$@" ;;
     review) cmd_review "$here" "$@" ;;
     scout) cmd_scout "$here" "$@" ;;
+    artifact) cmd_artifact "$here" "$@" ;;
     clean) cmd_clean "$here" "$@" ;;
     history) cmd_history "$here" "$@" ;;
     lessons) cmd_lessons "$here" "$@" ;;
@@ -81,6 +87,11 @@ load_config() {
   ORCHESTRA_SANDBOX=${ORCHESTRA_SANDBOX:-bwrap}
   ORCHESTRA_DEVENV_CMD=${ORCHESTRA_DEVENV_CMD:-}
   ORCHESTRA_WORKTREE_CMD=${ORCHESTRA_WORKTREE_CMD:-}
+  ORCHESTRA_STATE_CMD=${ORCHESTRA_STATE_CMD:-}                  # host-side read-only live-state snapshot for scouts
+  ORCHESTRA_RENDER_CMD=${ORCHESTRA_RENDER_CMD:-}                # prints the rendered form of a worktree (diff --rendered)
+  ORCHESTRA_ARTIFACTS_DIR=${ORCHESTRA_ARTIFACTS_DIR:-}
+  ORCHESTRA_ARTIFACT_SERVER_ORIGIN=${ORCHESTRA_ARTIFACT_SERVER_ORIGIN:-}
+  ORCHESTRA_ARTIFACT_TOKEN_CMD=${ORCHESTRA_ARTIFACT_TOKEN_CMD:-}
   ORCHESTRA_CHECKS=${ORCHESTRA_CHECKS:-the test and lint commands documented in the repository}
   ORCHESTRA_RW_BINDS=${ORCHESTRA_RW_BINDS:-}
   ORCHESTRA_RO_BINDS=${ORCHESTRA_RO_BINDS:-}
@@ -96,10 +107,11 @@ load_config() {
 
 cmd_run() {
   local here=$1; shift
-  local task="" spec="" wt="" feedback="" dry=0 allow_stale=0
+  local task="" spec="" wt="" feedback="" prompt_spec="" dry=0 allow_stale=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --spec) spec=${2:?}; shift 2 ;;
+      --prompt) prompt_spec=${2:?}; shift 2 ;;
       --worktree) wt=${2:?}; shift 2 ;;
       --feedback) feedback=${2:?}; shift 2 ;;
       --dry-run) dry=1; shift ;;
@@ -108,8 +120,12 @@ cmd_run() {
       *) [ -z "$task" ] || die "one task id only"; task=$1; shift ;;
     esac
   done
-  [ -n "$task" ] || die "usage: orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>] [--allow-stale]"
+  [ -n "$task" ] || die "usage: orchestra-worker run <task-id> (--spec <file> | --prompt <text>) [--worktree <dir>] [--feedback <file>] [--allow-stale]"
   [[ $task =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
+  if [ -n "$prompt_spec" ]; then
+    [ -z "$spec" ] || die "--prompt and --spec are mutually exclusive"
+    [ -z "$feedback" ] || die "--prompt and --feedback are mutually exclusive"
+  fi
 
   local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
   load_config "$repo"
@@ -140,14 +156,16 @@ cmd_run() {
     if [ -n "$ORCHESTRA_WORKTREE_CMD" ]; then
       (cd "$repo" && bash -c "${ORCHESTRA_WORKTREE_CMD//\{task\}/$task}") >&2
     else
-      git -C "$repo" worktree add -q -b "orchestra/$task" "$wt" HEAD
+      local start_ref=HEAD
+      if git -C "$repo" rev-parse --verify -q "$ORCHESTRA_BASE^{commit}" >/dev/null; then start_ref=$ORCHESTRA_BASE; fi
+      git -C "$repo" worktree add -q -b "orchestra/$task" "$wt" "$start_ref"
     fi
     [ -d "$wt" ] || die "worktree command did not create $wt"
   fi
   local gitdir; gitdir=$(git -C "$wt" rev-parse --path-format=absolute --git-dir)
 
   # The spec is resolved in the worktree if relative, so the worker reads the same file the prompt names.
-  if [ -z "$feedback" ]; then
+  if [ -z "$feedback" ] && [ -z "$prompt_spec" ]; then
     [ -n "$spec" ] || die "--spec <file> is required for a first run"
     [ -f "$spec" ] || [ -f "$wt/$spec" ] || die "spec not found: $spec"
     case "$spec" in /*) ;; *) [ -f "$wt/$spec" ] || spec=$(realpath "$spec") ;; esac
@@ -156,8 +174,16 @@ cmd_run() {
 
   local state="$wt/.orchestra"
   mkdir -p "$state/sessions" "$state/runs" "$state/home"
-  # The worker sees only the worktree: a spec that lives elsewhere (uncommitted, another repo) is copied in.
-  if [ -z "$feedback" ] && [ ! -f "$wt/$spec" ]; then
+  if [ -n "$prompt_spec" ]; then
+    # An ad-hoc prompt becomes a minimal spec in the worktree, so a run needs no task-board file.
+    local prompt_title
+    prompt_title=$(printf '%s\n' "$prompt_spec" | head -n1 | cut -c1-80)
+    {
+      printf -- '---\nid: %s\ntitle: %s\n---\n\n## Goal\n\n%s\n' "$task" "$prompt_title" "$prompt_spec"
+    } > "$state/spec.md"
+    spec=".orchestra/spec.md"
+  elif [ -z "$feedback" ] && [ ! -f "$wt/$spec" ]; then
+    # The worker sees only the worktree: a spec that lives elsewhere (uncommitted, another repo) is copied in.
     cp "$spec" "$state/spec.md"; spec=".orchestra/spec.md"
   fi
   check_fresh "$wt" "$spec" "$ORCHESTRA_BASE" "$dry" "$allow_stale" "$feedback"
@@ -885,6 +911,52 @@ cmd_guide() {
   if [ "$print" = 1 ]; then cat "$here/docs/$f"; else echo "$here/docs/$f"; fi
 }
 
+# cmd_artifact: collect one task's report, diff and proofs as an artifact (lib/artifact.py, installed separately).
+# Works on a task worktree, or on a scout's state directory when the task never ran.
+cmd_artifact() {
+  local here=$1; shift
+  local task="" wt="" out="" local_flag=0 open=0 json_flag=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --local) local_flag=1; shift ;;
+    --open) open=1; shift ;;
+    --json) json_flag=1; shift ;;
+    --worktree) wt=${2:?}; shift 2 ;;
+    --out|--out-dir) out=${2:?}; shift 2 ;;
+    -*) die "unknown option $1" ;;
+    *) [ -z "$task" ] || die "one task id only"; task=$1; shift ;;
+  esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker artifact <task-id> [--local] [--open] [--json] [--worktree <dir>] [--out-dir <dir>]"
+  [[ $task =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
+  [ -f "$here/lib/artifact.py" ] || die "lib/artifact.py not installed"
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
+  local wt_base; wt_base="$(dirname "$repo")/$(basename "$repo")-worktrees"
+  [ -n "$wt" ] || wt="$wt_base/$task"
+  wt=$(realpath -m "$wt")
+  local scout_dir; scout_dir=$(realpath -m "$wt_base/.scout/$task")
+  [ -d "$wt" ] || [ -d "$scout_dir" ] || die "no worktree or scout state for $task"
+  local -a args=(--repo "$repo" --task "$task" --base "$ORCHESTRA_BASE")
+  [ ! -d "$wt" ] || args+=(--worktree "$wt")
+  [ ! -d "$scout_dir" ] || args+=(--scout-dir "$scout_dir")
+  [ -z "$out" ] || args+=(--out-dir "$out")
+  [ "$local_flag" = 0 ] || args+=(--local)
+  [ "$open" = 0 ] || args+=(--open)
+  [ "$json_flag" = 0 ] || args+=(--json)
+  local rtmp=""
+  if [ -d "$wt" ] && [ -n "$ORCHESTRA_RENDER_CMD" ]; then
+    rtmp=$(mktemp)
+    # shellcheck disable=SC2064  # expanded now on purpose: rtmp is out of scope when the trap runs
+    trap "rm -f $(printf '%q' "$rtmp")" EXIT
+    cmd_diff "$here" "$task" --worktree "$wt" --rendered > "$rtmp" 2>/dev/null || true
+    [ -s "$rtmp" ] && args+=(--rendered-diff-file "$rtmp")
+  fi
+  # artifact.py reads these from the environment for its server upload, when configured.
+  ORCHESTRA_ARTIFACTS_DIR=$ORCHESTRA_ARTIFACTS_DIR \
+  ORCHESTRA_ARTIFACT_SERVER_ORIGIN=$ORCHESTRA_ARTIFACT_SERVER_ORIGIN \
+  ORCHESTRA_ARTIFACT_TOKEN_CMD=$ORCHESTRA_ARTIFACT_TOKEN_CMD \
+  python3 -I "$here/lib/artifact.py" "${args[@]}"
+}
+
 # cmd_clean: remove the worktrees of tasks that have landed (lib/clean.py decides which; it only lists without --yes).
 cmd_clean() {
   local here=$1; shift
@@ -899,11 +971,18 @@ cmd_clean() {
 # repository: the checkout and the git directory are mounted read-only, and its only writable place is its own home.
 # Output: <repo>-worktrees/.scout/<task>/scout.json (shape in prompts/scout.md), and a short view of it.
 cmd_scout() {
-  local here=$1; shift; local task="" spec=""
-  while [ $# -gt 0 ]; do case "$1" in --spec) spec=${2:?}; shift 2 ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
-  [ -n "$task" ] && [ -n "$spec" ] || die "usage: orchestra-worker scout <task-id> --spec <file>"
+  local here=$1; shift; local task="" spec="" prompt_spec="" want_state=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --spec) spec=${2:?}; shift 2 ;;
+    --prompt) prompt_spec=${2:?}; shift 2 ;;
+    --state) want_state=1; shift ;;
+    -*) die "unknown option $1" ;;
+    *) task=$1; shift ;;
+  esac; done
+  [ -n "$task" ] && { [ -n "$spec" ] || [ -n "$prompt_spec" ]; } || die "usage: orchestra-worker scout <task-id> (--spec <file> | --prompt <text>) [--state]"
+  [ -z "$spec" ] || [ -z "$prompt_spec" ] || die "--spec and --prompt are mutually exclusive"
   [[ $task =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
-  [ -f "$spec" ] || die "spec not found: $spec"
+  [ -z "$spec" ] || [ -f "$spec" ] || die "spec not found: $spec"
   local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
   load_config "$repo"
   local harness_file="$here/lib/harness/$ORCHESTRA_HARNESS.sh"
@@ -915,17 +994,44 @@ cmd_scout() {
 
   local state; state="$(dirname "$repo")/$(basename "$repo")-worktrees/.scout/$task"
   mkdir -p "$state/sessions" "$state/runs" "$state/home"
-  cp "$spec" "$state/home/spec.md"; rm -f "$state/home/scout.json" "$state/scout.json"
+  if [ -n "$prompt_spec" ]; then
+    printf '%s\n' "$prompt_spec" > "$state/home/spec.md"
+  else
+    cp "$spec" "$state/home/spec.md"
+  fi
+  rm -f "$state/home/scout.json" "$state/home/state.md" "$state/home/live-state.txt" "$state/home/live-state.err" \
+        "$state/scout.json" "$state/state.md"
+  # A host-side, read-only snapshot of live state: no credentials enter the scout's sandbox.
+  if [ -n "$ORCHESTRA_STATE_CMD" ]; then
+    local state_rc=0
+    set +e
+    (cd "$repo" && bash -c "$ORCHESTRA_STATE_CMD") 2>"$state/home/live-state.err" \
+      | head -c 65536 > "$state/home/live-state.txt"
+    state_rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$state_rc" != 0 ]; then
+      log "warning: ORCHESTRA_STATE_CMD exited $state_rc: live state may be incomplete"
+      printf '\n[orchestra: ORCHESTRA_STATE_CMD exited %s: live state may be incomplete]\n' "$state_rc" \
+        >> "$state/home/live-state.txt"
+    fi
+  fi
+  [ -s "$state/home/live-state.txt" ] && want_state=1
+  local live_state="none" state_out=""
+  if [ "$want_state" = 1 ]; then
+    [ -s "$state/home/live-state.txt" ] && live_state="/home/worker/live-state.txt"
+    state_out="/home/worker/state.md"
+  fi
   local common; common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
   local devenv=""
   if [ -n "$ORCHESTRA_DEVENV_CMD" ]; then
     devenv="$state/devenv.sh"
     (cd "$repo" && bash -c "$ORCHESTRA_DEVENV_CMD") > "$devenv" 2>/dev/null || die "ORCHESTRA_DEVENV_CMD failed"
   fi
-  local prompt; prompt=$(TASK="$task" SPEC="/home/worker/spec.md" OUT="/home/worker/scout.json" REPO="$repo" python3 -I -c '
+  local prompt; prompt=$(TASK="$task" SPEC="/home/worker/spec.md" OUT="/home/worker/scout.json" REPO="$repo" \
+    LIVE_STATE="$live_state" STATE_OUT="$state_out" python3 -I -c '
 import os,sys
 t=open(sys.argv[1]).read()
-for k in ("TASK","SPEC","OUT","REPO"): t=t.replace("{{"+k+"}}", os.environ[k])
+for k in ("TASK","SPEC","OUT","REPO","LIVE_STATE","STATE_OUT"): t=t.replace("{{"+k+"}}", os.environ[k])
 print(t)' "$here/prompts/scout.md")
   shopt -s nullglob; local runs=("$state"/runs/run-*.jsonl); shopt -u nullglob
   local n=$(( ${#runs[@]} + 1 )) out="$state/runs/run-$(( ${#runs[@]} + 1 ))"
@@ -958,6 +1064,10 @@ print(t)' "$here/prompts/scout.md")
   [ -z "$bad" ] || { log "MODEL POLICY: model(s) not allowed answered:$bad"; return 3; }
   [ -s "$state/home/scout.json" ] || { log "scout wrote no scout.json (exit $rc; see $out.err)"; return 4; }
   cp "$state/home/scout.json" "$state/scout.json"
+  if [ -s "$state/home/state.md" ]; then
+    cp "$state/home/state.md" "$state/state.md"
+    echo "state snapshot: $state/state.md"
+  fi
   python3 -I "$here/lib/scout_view.py" "$state/scout.json" "$task" "$out.usage.json" || return 4
   echo "full scout report: $state/scout.json"
   return "$rc"
@@ -1063,10 +1173,31 @@ checks() {
 }
 
 cmd_diff() {
-  local here=$1; shift; local task="" wt="" stat=0
-  while [ $# -gt 0 ]; do case "$1" in --worktree) wt=${2:?}; shift 2 ;; --stat) stat=1; shift ;; -*) die "unknown option $1" ;; *) task=$1; shift ;; esac; done
-  [ -n "$task" ] || die "usage: orchestra-worker diff <task-id> [--worktree <dir>] [--stat]"
+  local here=$1; shift; local task="" wt="" stat=0 rendered=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --worktree) wt=${2:?}; shift 2 ;;
+    --stat) stat=1; shift ;;
+    --rendered) rendered=1; shift ;;
+    -*) die "unknown option $1" ;;
+    *) task=$1; shift ;;
+  esac; done
+  [ -n "$task" ] || die "usage: orchestra-worker diff <task-id> [--worktree <dir>] [--stat] [--rendered]"
   local repo state; task_setup "$task" "$wt"
+  if [ "$rendered" = 1 ]; then
+    [ -n "$ORCHESTRA_RENDER_CMD" ] || die "--rendered needs ORCHESTRA_RENDER_CMD (a command that prints the rendered form)"
+    local tmp; tmp=$(mktemp -d)
+    local base_wt="$tmp/base"
+    # shellcheck disable=SC2064  # expanded now on purpose: $tmp is out of scope when the trap runs
+    trap "git -C $(printf '%q' "$wt") worktree remove --force $(printf '%q' "$base_wt") >/dev/null 2>&1 || true; rm -rf $(printf '%q' "$tmp")" EXIT
+    git -C "$wt" worktree add -q --detach "$base_wt" "$ORCHESTRA_BASE" \
+      || die "could not create a worktree at $ORCHESTRA_BASE"
+    (cd "$base_wt" && bash -c "$ORCHESTRA_RENDER_CMD") > "$tmp/base.out" 2>"$tmp/base.err" \
+      || die "ORCHESTRA_RENDER_CMD failed at $ORCHESTRA_BASE (see $tmp/base.err)"
+    (cd "$wt" && bash -c "$ORCHESTRA_RENDER_CMD") > "$tmp/worktree.out" 2>"$tmp/worktree.err" \
+      || die "ORCHESTRA_RENDER_CMD failed in $wt (see $tmp/worktree.err)"
+    diff -u "$tmp/base.out" "$tmp/worktree.out" || true
+    return 0
+  fi
   local mb; mb=$(git -C "$wt" merge-base HEAD "$ORCHESTRA_BASE" 2>/dev/null) || die "no merge base with $ORCHESTRA_BASE (fetch first?)"
   local idx; idx=$(mktemp); cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx"
   GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1
@@ -1160,7 +1291,16 @@ land_pr() {
   local wt=$1 task=$2 base=$3
   local prb=${ORCHESTRA_PR_BRANCH:-"orchestra/{task}"}; prb=${prb//\{task\}/$task}
   [ "$prb" != "$base" ] || die "ORCHESTRA_PR_BRANCH must not be the base branch"
-  local push=${ORCHESTRA_PR_PUSH_CMD:-"git push --force-with-lease origin HEAD:refs/heads/{branch}"}
+  local push=${ORCHESTRA_PR_PUSH_CMD:-}
+  if [ -z "$push" ]; then
+    # Forgejo-first: push to the remote the base names (forgejo/main -> forgejo), or origin.
+    local remote=origin
+    if [[ $ORCHESTRA_BASE == */* ]]; then
+      local candidate=${ORCHESTRA_BASE%%/*}
+      git -C "$wt" remote | grep -qxF "$candidate" && remote=$candidate
+    fi
+    push="git push --force-with-lease $remote HEAD:refs/heads/{branch}"
+  fi
   (cd "$wt" && bash -c "${push//\{branch\}/$prb}") >/dev/null 2>&1 || die "could not push $prb (ORCHESTRA_PR_PUSH_CMD)"
   local title body; title=$(git -C "$wt" log -1 --format=%s); body=$(mktemp)
   git -C "$wt" log -1 --format=%b > "$body"

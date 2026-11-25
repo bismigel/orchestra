@@ -221,14 +221,15 @@ rotation) and `ops-incident`. They are installed only with `./install.sh --ops`.
 ## Commands
 | Command | What it does |
 |---|---|
-| `orchestra-worker run <id> --spec <file>` | one worker run on one task (`--feedback <file>` for the next round) |
-| `orchestra-worker scout <id> --spec <draft>` | read-only check of a draft spec against the code |
+| `orchestra-worker run <id> --spec <file>` | one worker run on one task (`--feedback <file>` for the next round, `--prompt "<text>"` for an ad-hoc task) |
+| `orchestra-worker scout <id> --spec <draft>` | read-only check of a draft spec against the code (`--prompt "<text>"`; `--state` for a host-side live snapshot) |
 | `orchestra-worker status` / `watch` | what is running now, each worker's current action and cost |
 | `orchestra-worker review <id>` | the one-screen digest of a finished run (`--json`) |
-| `orchestra-worker diff <id>` | the review diff, generated files in the stat only |
+| `orchestra-worker diff <id>` | the review diff, generated files in the stat only (`--rendered` diffs `ORCHESTRA_RENDER_CMD` output) |
 | `orchestra-worker prove <id>` | the gate and the spec's `proof:` lines, bound to the exact code |
 | `orchestra-worker land <id>` | rebase, squash, prove, push with `Proof:` trailers (`--pr` for a pull request) |
 | `orchestra-worker lessons <id>` | draft lessons lines from what the spec missed |
+| `orchestra-worker artifact <id>` | collect a task's report, diff and proofs as an artifact (`--local`, `--open`) |
 | `orchestra-worker clean` / `history` | archive and remove landed worktrees / every task's runs, tokens and cost |
 | `orchestra-worker doctor` / `guide <name>` | check the setup / print a guide's path |
 | `orchestra-task lint` | the mechanical half of the definition of ready |

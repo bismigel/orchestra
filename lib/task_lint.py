@@ -20,6 +20,7 @@ STATUS = {"draft", "ready", "done"}
 UI_ONLY = re.compile(r"\b(screenshot|screenshots|in a browser|browser\)|visually|by eye)\b", re.I)
 HUMAN = re.compile(r"\b(orchestrator|human)\b", re.I)
 PROOF = re.compile(r"proof:\s*`")
+PROOF_ANY = re.compile(r"(?i)\bproof:\s*")
 
 
 def git(*args, cwd):
@@ -39,7 +40,7 @@ def parse(path):
         body = m.group(2)
     sections, cur = {}, None
     for line in body.splitlines():
-        h = re.match(r"^##\s+(.+?)\s*$", line)
+        h = re.match(r"^#{1,2}\s+(.+?)\s*$", line)
         if h:
             cur = h.group(1).strip().lower()
             sections[cur] = []
@@ -191,6 +192,8 @@ def main(argv):
             for line in acc.splitlines():
                 if UI_ONLY.search(line) and not HUMAN.search(line):
                     errs.append(f"L8 visual check not marked Orchestrator/Human: {line.strip()[:90]}")
+                if PROOF_ANY.search(line) and not PROOF.search(line):
+                    warns.append(f"L8 proof: command must be in backticks: {line.strip()[:90]}")
         if "acceptance" in sec and not PROOF.search(acc):
             warns.append("L8 no proof: line: land will prove only the gate")
 
