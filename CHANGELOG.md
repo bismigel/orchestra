@@ -7,6 +7,9 @@ and both `review` (text and `--json`) and `land` report `candidate drift` with a
 `land` still re-proves the tree it publishes and leaves a fresh candidate; writing the record never invalidates the
 proof (`.orchestra/` is excluded from the tree hash). `review --json` gains `candidate` (null, or the record plus
 `drift` and `drift_stat`). New offline suite: `tests/candidate.sh`.
+- **Skills:** a new `orchestra-land` skill for Claude Code (the pi `/land` prompt's steps, plus landing onto a base
+  that is not on a remote), and the `orchestra` skill now tells the orchestrator about `candidate:` and
+  `candidate drift:` in review and land.
 
 ## 0.7.0 (2026-11-23)
 Why: [proposals/0004](docs/proposals/0004-skill-gaps.md).
