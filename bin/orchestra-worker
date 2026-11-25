@@ -6,7 +6,8 @@
 #   orchestra-worker diff <task-id> [--worktree <dir>] [--stat]     review diff, generated files only in the stat
 #   orchestra-worker prove <task-id> [--worktree <dir>] [--manual "what you checked"]
 #   orchestra-worker land <task-id> [--pr] [--worktree <dir>] [--message-file <file>]
-#                                             --pr (or ORCHESTRA_LAND=pr): push a branch and open a pull request
+#                                             --pr (or ORCHESTRA_LAND=pr): push a branch and open a pull request;
+#                                             a local-branch ORCHESTRA_BASE is moved in place instead of pushed
 #   orchestra-worker status [--json] [--prune] [--worktree <dir>]
 #                                             what is running now, and what died silently (--prune clears those)
 #   orchestra-worker watch [<task-id>]        live view of running workers: what each one is doing right now
@@ -839,8 +840,10 @@ cmd_doctor() {
   # Repository: base, gate, dev environment, caches, budget
   if git -C "$repo" rev-parse --verify -q "$ORCHESTRA_BASE^{commit}" >/dev/null; then ok_ "base $ORCHESTRA_BASE ($(git -C "$repo" rev-parse --short "$ORCHESTRA_BASE"))"
   else fail_ "base $ORCHESTRA_BASE does not resolve (fetch, or set ORCHESTRA_BASE)"; fi
-  if [[ $ORCHESTRA_BASE == */* ]] && ! git -C "$repo" remote | grep -qxF "${ORCHESTRA_BASE%%/*}"; then
-    warn_ "base $ORCHESTRA_BASE is not <remote>/<branch> of a configured remote: land needs one"; fi
+  if base_is_local "$repo"; then
+    ok_ "base $ORCHESTRA_BASE is a local branch: land moves it in place (no fetch, no push, no --pr)"
+  elif [[ $ORCHESTRA_BASE != */* ]] || ! git -C "$repo" remote | grep -qxF "${ORCHESTRA_BASE%%/*}"; then
+    warn_ "base $ORCHESTRA_BASE is neither <remote>/<branch> of a configured remote nor a local branch: land cannot use it"; fi
   if [ -n "$ORCHESTRA_GATE" ]; then ok_ "gate: $ORCHESTRA_GATE"
   else warn_ "no ORCHESTRA_GATE: prove and land run only the spec's proof: lines"; fi
   if [ -n "$ORCHESTRA_DEVENV_CMD" ]; then
@@ -1123,6 +1126,33 @@ cmd_prove() {
   prove_all "$wt" "$task"
 }
 
+# base_is_local <repo>: true when ORCHESTRA_BASE names a local branch rather than <remote>/<branch> of a configured
+# remote (an integration branch, or a forge that is not reachable). "plan/x" is local when "plan" is not a remote.
+base_is_local() {
+  local repo=$1
+  if [[ $ORCHESTRA_BASE == */* ]] && git -C "$repo" remote | grep -qxF "${ORCHESTRA_BASE%%/*}"; then return 1; fi
+  git -C "$repo" show-ref --verify -q "refs/heads/$ORCHESTRA_BASE"
+}
+
+# land_local <wt> <task> <base-branch> <old-commit>: move a local base to the proven commit, only if it still points
+# at <old-commit> (the commit the task was rebased onto). Returns 1 when the base moved, so land rebases and proves
+# again. A checkout of the base is fast-forwarded only when it has no uncommitted changes to tracked files: moving the
+# ref under a dirty checkout would make its work look reverted.
+land_local() {
+  local wt=$1 task=$2 base=$3 old=$4 new co
+  new=$(git -C "$wt" rev-parse HEAD)
+  co=$(git -C "$wt" worktree list --porcelain | awk -v want="branch refs/heads/$base" '/^worktree /{w=substr($0, 10)} $0 == want {print w}')
+  if [ -n "$co" ]; then
+    [ -z "$(git -C "$co" status --porcelain --untracked-files=no)" ] \
+      || die "not landed: $base is checked out with uncommitted changes in $co (commit or stash them, then land again)"
+    [ "$(git -C "$co" rev-parse HEAD)" = "$old" ] || return 1
+    git -C "$co" merge -q --ff-only "$new" || return 1
+  else
+    git -C "$wt" update-ref -m "orchestra land $task" "refs/heads/$base" "$new" "$old" 2>/dev/null || return 1
+  fi
+  echo "landed $task on local $base: $(git -C "$wt" log -1 --format='%h %s')"
+}
+
 # land_pr <wt> <task> <base-branch>: for protected bases. Push the proven, squashed commit to its own branch
 # (ORCHESTRA_PR_BRANCH, default orchestra/<task>; force-with-lease, it is the task's own branch, never the base) and
 # open a pull request with ORCHESTRA_PR_CMD ({branch} {base} {title} {body} replaced; default: gh when installed).
@@ -1163,8 +1193,13 @@ cmd_land() {
   [ -n "$task" ] || die "usage: orchestra-worker land <task-id> [--pr] [--worktree <dir>] [--message-file <file>]"
   local repo state; task_setup "$task" "$wt"
   [ -z "$msgfile" ] || [ -f "$msgfile" ] || die "message file not found: $msgfile"
-  local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/}
-  [ "$remote" != "$ORCHESTRA_BASE" ] || die "ORCHESTRA_BASE must be <remote>/<branch>"
+  local remote=${ORCHESTRA_BASE%%/*} branch=${ORCHESTRA_BASE#*/} localbase=0 onto
+  if base_is_local "$wt"; then
+    localbase=1; branch=$ORCHESTRA_BASE
+    [ "$pr" = 0 ] || die "land --pr needs a remote base: $ORCHESTRA_BASE is a local branch"
+  else
+    [ "$remote" != "$ORCHESTRA_BASE" ] || die "ORCHESTRA_BASE must be <remote>/<branch> or a local branch"
+  fi
   local title="" spec; spec=$(spec_file "$wt" "$task")
   [ -n "$spec" ] && title=$(sed -n 's/^title:[[:space:]]*//p' "$spec" | head -1)
   # Uncommitted work becomes one commit first; everything is squashed below.
@@ -1177,7 +1212,8 @@ cmd_land() {
     done
   fi
   for _ in 1 2; do   # one retry if the base moved
-    git -C "$wt" fetch -q "$remote" || die "fetch failed"
+    if [ "$localbase" = 0 ]; then git -C "$wt" fetch -q "$remote" || die "fetch failed"; fi
+    onto=$(git -C "$wt" rev-parse "$ORCHESTRA_BASE^{commit}")
     git -C "$wt" rebase -q "$ORCHESTRA_BASE" >/dev/null 2>&1 || { git -C "$wt" rebase --abort 2>/dev/null; die "rebase onto $ORCHESTRA_BASE has conflicts: resolve them in $wt, then land again"; }
     # Squash onto the base we just rebased on (safe: nothing on the base is behind us, so nothing is reverted).
     if [ "$(git -C "$wt" rev-list --count "$ORCHESTRA_BASE..HEAD")" -gt 1 ] || [ "$(git -C "$wt" log -1 --format=%s)" = "wip $task" ]; then
@@ -1208,6 +1244,10 @@ print("\n" + "\n".join(lines))
 PY
     git -C "$wt" commit -q --amend -F "$msg"; rm -f "$msg"
     if [ "$pr" = 1 ]; then land_pr "$wt" "$task" "$branch"; return; fi
+    if [ "$localbase" = 1 ]; then
+      land_local "$wt" "$task" "$branch" "$onto" && return 0
+      echo "$ORCHESTRA_BASE moved while proving; rebasing and proving again"; continue
+    fi
     if (cd "$wt" && bash -c "${ORCHESTRA_PUSH_CMD//\{branch\}/$branch}") >/dev/null 2>&1; then
       echo "landed $task: $(git -C "$wt" log -1 --format='%h %s')"; return 0
     fi

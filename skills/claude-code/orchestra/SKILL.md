@@ -39,7 +39,7 @@ printed by `orchestra-worker guide orchestrator`; the essentials:
    yourself. Small fixes you have already decided: just make them.
 6. **Land** with the `orchestra-land` skill, or directly: `orchestra-worker land <id>` (rebase, squash, prove the
    exact code, push with `Proof:` trailers; it refuses on any failing check, and reports `candidate drift:` if the
-   worktree moved since the last proof). Protected base branch: `orchestra-worker land <id> --pr` pushes a branch and opens
+   worktree moved since the last proof). A local-branch `ORCHESTRA_BASE` is moved in place instead of pushed. Protected base branch: `orchestra-worker land <id> --pr` pushes a branch and opens
    a pull request instead. Tell the user what landed, the rounds and the cost (`orchestra-worker summary <id>`).
    Then **record what the spec missed**: `orchestra-worker lessons <id>` drafts lines from the run's blocking
    questions, outside-path files and assumptions; keep the ones that would change a future spec, write the rule,
