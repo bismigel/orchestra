@@ -6,6 +6,7 @@ ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
 W="$ROOT/bin/orchestra-worker"
 ROUTER="$ROOT/examples/pi/orchestra-router.ts"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+export TMPDIR_ROUTER="$TMP" ORCHESTRA_ROUTER_CACHE="$TMP/router-cache.json"  # never touch the real per-model cache
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "ok   $*"; }
 bad() { fail=$((fail+1)); echo "FAIL $*"; }
@@ -224,6 +225,85 @@ await t("a blocking tool result is deep before any classifier call", async () =>
   });
   eq(calls, 0, "classifier calls");
   eq(r.tier, "deep", "tier");
+});
+
+// ---- one router per physical model ----
+const cat = (provider, id, extra = {}) => ({ provider, id, name: id, api: "x", reasoning: true, contextWindow: 1000, maxTokens: 100, ...extra });
+await t("supportedLevels follows Pi: null drops a level, xhigh only when mapped, no reasoning is off", () => {
+  eq(m.supportedLevels(cat("p", "a")), ["off", "low", "medium", "high"], "plain");
+  eq(m.supportedLevels(cat("p", "a", { thinkingLevelMap: { medium: null } })), ["off", "low", "high"], "flash-like");
+  eq(m.supportedLevels(cat("p", "a", { thinkingLevelMap: { xhigh: "max" } })), ["off", "low", "medium", "high", "xhigh"], "xhigh");
+  eq(m.supportedLevels(cat("p", "a", { reasoning: false })), ["off"], "no reasoning");
+});
+await t("tiersForLevels is frugal and stays on the model's ladder", () => {
+  eq(m.tiersForLevels(["off", "low", "medium", "high"]), { routine: "off", standard: "low", deep: "medium" }, "full");
+  eq(m.tiersForLevels(["off", "low", "high"]), { routine: "off", standard: "low", deep: "high" }, "no medium");
+  eq(m.tiersForLevels(["low", "medium"]), { routine: "low", standard: "low", deep: "medium" }, "no off");
+});
+await t("perModelEntries: one entry per reasoning chat model, readable ids, fixed model", () => {
+  const e = m.perModelEntries([
+    cat("claude-bridge", "claude-opus-5-5"),
+    cat("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.7-code"),
+    cat("cloudflare-workers-ai", "@cf/meta/llama-3.3-70b", { reasoning: false }),
+    cat("orchestra", "ds-auto"),
+    cat("p", "virtual", { api: "pi-virtual" }),
+    cat("p", "jev", { type: "classifier" }),
+  ]);
+  eq(e.map((x) => x.id), ["claude-bridge-claude-opus-5-5-auto", "cloudflare-workers-ai-kimi-k2.7-code-auto"], "ids");
+  eq(e[1].model, "cloudflare-workers-ai/@cf/moonshotai/kimi-k2.7-code", "full model ref");
+  eq(e[0].contextWindow, 1000, "limits carried");
+});
+await t("perModelEntries: colliding short ids fall back to the full id", () => {
+  const e = m.perModelEntries([cat("p", "a/x"), cat("p", "b/x")]);
+  eq(e.map((x) => x.id), ["p-a-x-auto", "p-b-x-auto"], "ids");
+});
+await t("a per-model config pins its own model; env model pins do not apply", () => {
+  const c = m.readRouterConfig({ ORCHESTRA_ROUTER_MODEL: "a/b" }, "p-x-auto", { model: "p/x", tiers: { routine: "off", standard: "low", deep: "high" }, levels: ["off", "low", "high"] });
+  eq(c.model, "p/x", "model");
+  eq(c.tiers.deep, "high", "tiers");
+  const r = m.decideRoute({ reason: "user", tier: "deep", virtualLevel: "medium", messages: [user("design it")], config: c });
+  eq([r.model, r.thinkingLevel], ["p/x", "high"], "route");
+});
+await t("mergePerModelEntries keeps cached entries only for providers this session cannot see", () => {
+  const e = (id, model) => ({ id, model });
+  const next = m.mergePerModelEntries([e("a-old-auto", "a/old"), e("b-x-auto", "b/x")], [e("a-new-auto", "a/new")]);
+  eq(next.map((x) => x.id), ["a-new-auto", "b-x-auto"], "ids");
+});
+await t("the per-model cache round-trips and drops malformed entries", async () => {
+  const fs = await import("node:fs");
+  const path = process.env.TMPDIR_ROUTER + "/cache.json";
+  const good = m.perModelEntries([cat("p", "a")]);
+  fs.writeFileSync(path, JSON.stringify({ version: 1, entries: [...good, { id: "ds-auto", model: "x/y", levels: [], tiers: {} }, { id: "bad" }] }));
+  eq(m.readPerModelCache(path), good, "entries");
+  eq(m.readPerModelCache(path + ".missing"), [], "missing");
+  eq(m.perModelCachePath({ ORCHESTRA_ROUTER_CACHE: "/c" }), "/c", "override");
+  eq(m.perModelCachePath({ XDG_CACHE_HOME: "/x" }), "/x/orchestra/router-models.json", "xdg");
+});
+await t("the extension registers cached per-model routers at load and refreshes them at session_start", async () => {
+  const fs = await import("node:fs");
+  const path = process.env.TMPDIR_ROUTER + "/load.json";
+  fs.writeFileSync(path, JSON.stringify({ version: 1, entries: m.perModelEntries([cat("gone", "old"), cat("p", "a")]) }));
+  const saved = process.env.ORCHESTRA_ROUTER_CACHE;
+  process.env.ORCHESTRA_ROUTER_CACHE = path;
+  const ids = new Set(); const handlers = {};
+  const pi = {
+    registerVirtualModel: (d) => ids.add(d.id),
+    unregisterVirtualModel: (_p, id) => ids.delete(id),
+    registerCommand: () => {},
+    on: (ev, fn) => { handlers[ev] = fn; },
+  };
+  try {
+    m.default(pi);
+    eq(["gone-old-auto", "p-a-auto"].every((id) => ids.has(id)), true, "cached ids registered at load");
+    eq(ids.has("ds-auto") && ids.has("flash-auto"), true, "named profiles still registered");
+    await handlers.session_start({}, { modelRegistry: { getAvailable: () => [cat("p", "a"), cat("p", "b")] } });
+    eq(ids.has("p-b-auto"), true, "new model registered");
+    eq(ids.has("gone-old-auto"), false, "unusable model unregistered");
+    const cached = m.readPerModelCache(path).map((e) => e.id);
+    eq(cached, ["gone-old-auto", "p-a-auto", "p-b-auto"], "cache keeps the unseen provider");
+  } finally {
+    if (saved == null) delete process.env.ORCHESTRA_ROUTER_CACHE; else process.env.ORCHESTRA_ROUTER_CACHE = saved;
+  }
 });
 
 // Pi passes catalog Model objects (not "provider/id" strings) in request.previous.model and request.failed.model.

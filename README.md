@@ -247,7 +247,8 @@ pi: link [examples/pi/orchestra.ts](examples/pi/orchestra.ts) and [examples/pi/w
 into `~/.pi/agent/extensions/`. The optional virtual model router ([examples/pi/orchestra-router.ts](examples/pi/orchestra-router.ts))
 picks a thinking level per turn on one fixed model (it never switches models, which would reread the whole
 context) — `orchestra/ds-auto`, `gemini-auto`, `claude-auto`, `cb-auto` (Claude via Claude Code and a
-subscription), and `flash-auto` for workers;
+subscription), `flash-auto` for workers, and one `orchestra/<provider>-<model>-auto` for every reasoning model in your
+catalog;
 see [docs/router.md](docs/router.md) for the profiles, the frugal thinking levels and the benchmark behind them.
 An optional second opinion from a classifier model (Jev) flags specs that may not be settled and runs that deserve a
 closer look (`orchestra-worker decide`); it can only raise attention, and is off by default: see

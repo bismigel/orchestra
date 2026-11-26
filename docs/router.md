@@ -27,6 +27,23 @@ session economics, not model-family properties.
 Override a model with `ORCHESTRA_ROUTER_MODEL` (the `ds` profile) or `ORCHESTRA_ROUTER_<PROFILE>_MODEL` (the others).
 The old `ORCHESTRA_ROUTER_STRONG` pin still works as an alias; `ORCHESTRA_ROUTER_FAST` is ignored.
 
+### One router per physical model
+
+Besides the named profiles, every reasoning chat model in your catalog gets its own router,
+`orchestra/<provider>-<model>-auto` (the last segment of the model id), for example
+`orchestra/claude-bridge-claude-sonnet-5-5-auto` or `orchestra/cloudflare-workers-ai-kimi-k2.7-code-auto`. Each one is
+pinned to that model and uses the same frugal tiers, mapped onto the model's own thinking levels: `deep` is `medium`,
+or `high` when the model has no `medium`. Models without reasoning get no router, because there is no thinking level to
+route. When two short ids collide, both fall back to the full model id.
+
+Pi has no catalog while extensions load. So the list is built at `session_start` from the available models (the
+providers that have credentials) and cached in `$XDG_CACHE_HOME/orchestra/router-models.json` (override it with
+`ORCHESTRA_ROUTER_CACHE`). The next start registers the cached list at load time, so `--model orchestra/<x>-auto`,
+`pi --list-models` and resumed sessions find it. A session that cannot see a provider, such as a worker started with
+`--no-extensions` or without that provider's key, unregisters that provider's routers for itself but leaves them in the
+cache. `ORCHESTRA_ROUTER_PER_MODEL=0` turns per-model routers off. Env model pins
+(`ORCHESTRA_ROUTER_<PROFILE>_MODEL`) apply only to the named profiles.
+
 `flash-auto` exists because workers must stay on one cheap model (AGENTS.md: workers run on DeepSeek Flash). The post-run
 `ORCHESTRA_ALLOWED_MODELS` guard still applies: any other physical model fails the run with exit 3.
 
