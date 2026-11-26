@@ -105,6 +105,8 @@ cat > "$WT/.orchestra/report.json" <<'REPORT'
   "open_questions": ["Is the greeting name fixed?", "Should the greeting be localised?"],
   "assumptions": ["Used the existing greeting helper."],
   "out_of_scope_needed": ["docs need updating"],
+  "risk_notes": ["Touches a shared cluster policy; try it on a scratch namespace.", "Rollback: revert the manifest."],
+  "rendered_diff": ["- replicas: 1", "+ replicas: 2"],
   "acceptance": [
     {"item": "greeting prints", "met": true},
     {"item": "name flag", "met": false}
@@ -132,6 +134,11 @@ has "assumed count" "assumed (1)"
 line_has "assumption text" "  1. Used the existing greeting helper."
 has "outside scope needed" "outside scope needed (1)"
 line_has "outside scope text" "  - docs need updating"
+has "risk notes count" "RISK NOTES (2)"
+line_has "first risk note" "  1. Touches a shared cluster policy; try it on a scratch namespace."
+line_has "second risk note" "  2. Rollback: revert the manifest."
+has "rendered diff section" "rendered diff"
+line_has "rendered diff line" "  + replicas: 2"
 
 # 1b. The lessons reminder sits directly before the next line and counts every spec gap.
 line_has "lessons reminder counts the spec gaps" "lessons   5 spec gap(s): orchestra-worker lessons R1"
@@ -139,13 +146,46 @@ line_has "lessons reminder counts the spec gaps" "lessons   5 spec gap(s): orche
 # 2b. The --json object carries the same digest for editor widgets.
 run_review_json || true
 json_check "--json parses" 'd["task"] == "R1"'
-json_check "--json has every key" 'set(d) == {"task", "run", "candidate", "report_valid", "status", "summary", "blocking", "assumed", "outside_scope_needed", "paths", "spec_gaps", "worker_checks", "acceptance", "proofs", "diff"} and set(d["run"]) == {"n", "exit", "meaning", "secs", "responses", "cost", "task_total", "runs"} and set(d["paths"]) == {"checked", "outside"} and set(d["proofs"]) == {"tree", "checks", "manual"} and set(d["diff"]) == {"files", "added", "removed", "generated", "list"}'
+json_check "--json has every key" 'set(d) == {"task", "run", "candidate", "report_valid", "status", "summary", "blocking", "assumed", "outside_scope_needed", "risk_notes", "rendered_diff", "paths", "spec_gaps", "worker_checks", "acceptance", "proofs", "diff"} and set(d["run"]) == {"n", "exit", "meaning", "secs", "responses", "cost", "task_total", "runs"} and set(d["paths"]) == {"checked", "outside"} and set(d["proofs"]) == {"tree", "checks", "manual"} and set(d["diff"]) == {"files", "added", "removed", "generated", "list"}'
 json_check "--json blocking texts" 'd["blocking"] == ["Is the greeting name fixed?", "Should the greeting be localised?"]'
 json_check "--json assumption text" 'd["assumed"] == ["Used the existing greeting helper."]'
 json_check "--json outside path" 'd["paths"]["outside"] == ["other/x.py"]'
 json_check "--json counts the spec gaps" 'd["spec_gaps"] == 5'
 json_check "--json run exit and secs" 'd["run"]["exit"] == 0 and d["run"]["secs"] == 65'
 json_check "--json marks the generated file" 'any(f["path"] == "view_templ.go" and f["generated"] for f in d["diff"]["list"])'
+json_check "--json carries risk notes" 'd["risk_notes"] == ["Touches a shared cluster policy; try it on a scratch namespace.", "Rollback: revert the manifest."]'
+json_check "--json carries the rendered diff" 'd["rendered_diff"] == ["- replicas: 1", "+ replicas: 2"]'
+
+# 2c. Task sections may use a top-level # heading, and an unbackticked proof: line is a warning.
+cat > "$TMP/hash-headings.md" <<'SPEC'
+---
+id: R1
+title: Review fixture
+status: ready
+depends: none
+delegation: worker
+---
+# Touches
+- `README.md`: one line
+
+# Acceptance
+L8 proof: command must be in backticks
+
+# Out of scope
+- nothing
+SPEC
+python3 -I - "$TMP/hash-headings.md" "$ROOT/lib" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[2])
+import task_lint
+_fm, sections = task_lint.parse(sys.argv[1])
+assert "touches" in sections, sections
+assert "acceptance" in sections, sections
+line = [l for l in sections["acceptance"].splitlines() if "proof:" in l][0]
+assert task_lint.PROOF_ANY.search(line) and not task_lint.PROOF.search(line), line
+PY
+if [ $? = 0 ]; then ok "# headings are sections and an unbackticked proof: line is caught"; else
+  bad "# heading / proof: warning fixture failed"; fi
 
 # 3. Header: run number, exit meaning, duration, responses and cost; a missing result file says exit ?.
 has "header run and exit" "run 1 exit 0 (ok)"

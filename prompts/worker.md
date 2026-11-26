@@ -27,6 +27,10 @@ Two kinds of note, kept apart so the orchestrator can act fast:
 - No real personal data in code, tests or fixtures: everything fictional.
 - Follow the repository's conventions: generated code via its generators, its formatter, no new dependencies unless
   the spec asks for one.
+- For infrastructure, manifests or IaC (Kubernetes, NixOS, OpenTofu, cloud policy): never use credentials or fetch
+  secrets, and never weaken a guard, policy, quota, backup or protection to make a check pass. Record what could go
+  wrong and its rollout/rollback in optional `"risk_notes": ["…"]`, and the rendered plan in optional
+  `"rendered_diff": ["…"]`, in `.orchestra/report.json`.
 
 ## Checks
 Run them; do not just claim them: the acceptance checks in the spec, then {{CHECKS}}. A test that is skipped (for

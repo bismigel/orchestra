@@ -2,6 +2,8 @@
 # orchestra tests: no model calls, no network. Run from anywhere: tests/run.sh
 set -euo pipefail
 main() {
+  # Isolate from any outer orchestra-worker invocation (e.g. ORCHESTRA_PR_BRANCH during self-landing).
+  local _v; for _v in $(compgen -e | grep '^ORCHESTRA_' || true); do unset "$_v"; done
   local root; root=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
   export ORCHESTRA_TEST_ROOT=$root XDG_CONFIG_HOME
   XDG_CONFIG_HOME=$(mktemp -d)   # never read the developer's own config
@@ -108,6 +110,47 @@ main() {
   ( cd "$lrepo" && "$root/bin/orchestra-task" lint --base HEAD --profile ops O1 ) > "$tmp/out" 2>&1 || true
   has "lint (ops): risk and rollback required" "L1 front matter missing: risk, rollback"
   ( cd "$lrepo" && "$root/bin/orchestra-task" lint --base HEAD O1 ) > "$tmp/out" 2>&1 && ok "lint (dev): no risk/rollback needed" || bad "lint (dev) wrongly needs risk/rollback"
+  # A top-level # heading is a section too, and an unbackticked proof: line is a warning.
+  cat > "$lrepo/docs/work/tasks/A5-hash.md" <<'TASK'
+---
+id: A5
+title: Hash headings
+status: ready
+depends: none
+delegation: worker
+---
+# Owns
+- `src/hash_heading.py` (new)
+
+# Acceptance
+- `true`
+- L8 proof: command must be in backticks
+
+# Out of scope
+Nothing.
+TASK
+  ( cd "$lrepo" && "$root/bin/orchestra-task" lint --base HEAD A5 ) > "$tmp/out" 2>&1 || true
+  has "lint: # headings are sections" "ok   A5"
+  has "lint: an unbackticked proof line warns" "proof: command must be in backticks"
+
+  # A new worktree branches from ORCHESTRA_BASE, not from whatever HEAD a dirty checkout has. --prompt writes a spec.
+  local brepo="$tmp/basebranch"; git init -q -b basebranch "$brepo"
+  git -C "$brepo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$brepo" checkout -q -b other
+  echo other > "$brepo/other.txt"; git -C "$brepo" add -A
+  git -C "$brepo" -c user.email=t@t -c user.name=t commit -qm other
+  expect_rc 2 "run refuses --prompt with --spec" env -C "$brepo" ORCHESTRA_BASE=basebranch "$W" run bad --spec spec.md --prompt x
+  expect_rc 0 "run --prompt on a worktree branched from ORCHESTRA_BASE" \
+    env -C "$brepo" ORCHESTRA_BASE=basebranch ORCHESTRA_SANDBOX=none FAKE_MODEL=fake/worker-1 "$W" run base1 --prompt "Ad-hoc base test"
+  local bwt="$tmp/basebranch-worktrees/base1"
+  if [ -d "$bwt" ] && [ ! -e "$bwt/other.txt" ] && \
+     [ "$(git -C "$bwt" rev-parse HEAD)" = "$(git -C "$brepo" rev-parse basebranch)" ]; then
+    ok "the worktree starts at ORCHESTRA_BASE, not at the other local HEAD"; else
+    bad "worktree was not branched from ORCHESTRA_BASE (HEAD $(git -C "$bwt" rev-parse HEAD 2>/dev/null))"; fi
+  [ -f "$bwt/.orchestra/spec.md" ] && ok "run --prompt writes .orchestra/spec.md" || bad "no spec written for --prompt"
+  grep -qx 'id: base1' "$bwt/.orchestra/spec.md" && ok "the prompt spec has the task id" || bad "prompt spec lacks the id"
+  grep -qx 'title: Ad-hoc base test' "$bwt/.orchestra/spec.md" && ok "the prompt spec has a title" || bad "prompt spec lacks a title"
+  grep -qx 'Ad-hoc base test' "$bwt/.orchestra/spec.md" && ok "the prompt spec keeps the prompt as the goal" || bad "prompt spec lacks the goal"
 
 
   # diff, prove, land: a bare remote, a task worktree, a gate and a spec proof line. No model involved.
@@ -139,6 +182,12 @@ main() {
   echo more > "$LW/greet.txt"
   expect_rc 0 "a change invalidates the proof" env -C "$LR" ORCHESTRA_GATE=true "$W" prove P1
   hasnt "a changed tree is not reported as proven" "(proven)  test -f"
+  expect_rc 2 "diff --rendered needs ORCHESTRA_RENDER_CMD" env -C "$LR" ORCHESTRA_BASE=origin/main "$W" diff P1 --rendered
+  expect_rc 0 "diff --rendered exits 0 even when the rendered outputs differ" \
+    env -C "$LR" ORCHESTRA_BASE=origin/main ORCHESTRA_RENDER_CMD='if [ -f greet.txt ]; then cat greet.txt; else echo base; fi' \
+    "$W" diff P1 --rendered
+  has "rendered diff shows the base value" "-base"
+  has "rendered diff shows the worktree value" "+more"
   expect_rc 0 "manual proof" env -C "$LR" "$W" prove P1 --manual "looked at it in a browser"
   expect_rc 2 "land refuses when a check fails" env -C "$LR" ORCHESTRA_GATE=false "$W" land P1
   expect_rc 0 "land" env -C "$LR" ORCHESTRA_GATE=true "$W" land P1
@@ -178,6 +227,30 @@ main() {
     bad "a commit title ran as code in the PR command"; else ok "a hostile title is data, not code"; fi
   expect_rc 0 "land --pr with ORCHESTRA_PR_CMD=none just pushes" env -C "$LR" ORCHESTRA_GATE=true ORCHESTRA_PR_CMD=none "$W" land P3 --pr
   has "without a PR command it says what to do" "open a pull request into main"
+
+  # land --pr pushes to the remote ORCHESTRA_BASE names (forgejo/main -> forgejo), not to origin.
+  ( set -e
+    cd "$tmp"; mkdir -p forgejo-land; cd forgejo-land
+    git init -q --bare forgejo.git
+    git init -q --bare origin.git
+    git init -q -b main repo; cd repo
+    git commit -q --allow-empty -m init
+    git remote add forgejo "$tmp/forgejo-land/forgejo.git"
+    git remote add origin "$tmp/forgejo-land/origin.git"
+    git push -q forgejo HEAD:main
+    git fetch -q forgejo
+    git checkout -q -B main forgejo/main
+    git worktree add -q -b task/F1 ../repo-worktrees/F1 forgejo/main
+    cd ../repo-worktrees/F1
+    echo one > one.txt; git add -A; git commit -qm "F1: via forgejo"
+  ) >/dev/null 2>&1 && ok "forgejo land fixture" || bad "forgejo land fixture"
+  local FL="$tmp/forgejo-land/repo"
+  expect_rc 0 "land --pr derives the push remote from ORCHESTRA_BASE" \
+    env -C "$FL" ORCHESTRA_BASE=forgejo/main ORCHESTRA_GATE=true ORCHESTRA_PR_CMD=none "$W" land F1 --pr
+  if git -C "$tmp/forgejo-land/forgejo.git" rev-parse -q --verify refs/heads/orchestra/F1 >/dev/null; then
+    ok "the PR branch was pushed to forgejo"; else bad "the PR branch was not pushed to forgejo"; fi
+  if git -C "$tmp/forgejo-land/origin.git" rev-parse -q --verify refs/heads/orchestra/F1 >/dev/null 2>&1; then
+    bad "the PR branch was pushed to origin instead"; else ok "origin was not used for the PR branch"; fi
 
   # land onto a local base: no remote at all. The base is moved with a compare-and-swap, a checkout of it is
   # fast-forwarded only when clean, and --pr is refused.

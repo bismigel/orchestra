@@ -290,6 +290,8 @@ def collect(args, state):
         "blocking": text_list(report.get("open_questions")) if valid else [],
         "assumed": text_list(report.get("assumptions")) if valid else [],
         "outside_scope_needed": text_list(report.get("out_of_scope_needed")) if valid else [],
+        "risk_notes": text_list(report.get("risk_notes")) if valid else [],
+        "rendered_diff": text_list(report.get("rendered_diff")) if valid else [],
     }
     if valid:
         data["_status_line"] = f"{report.get('status', '')}: {report.get('summary', '')}"
@@ -414,6 +416,17 @@ def render_text(data):
             for item in outside_scope:
                 print(f"  - {item}")
 
+    risk_notes = data["risk_notes"]
+    if risk_notes:
+        print(f"RISK NOTES ({len(risk_notes)})")
+        for i, item in enumerate(risk_notes, 1):
+            print(f"  {i}. {item}")
+    rendered_diff = data["rendered_diff"]
+    if rendered_diff:
+        print("rendered diff")
+        for line in rendered_diff:
+            print(f"  {line}")
+
     paths = data["paths"]
     if not paths["checked"]:
         print(f"{'paths':<10}not checked (no Owns/Touches in the spec)")
@@ -464,7 +477,8 @@ def render_text(data):
 
 
 PUBLIC_KEYS = ("task", "run", "candidate", "report_valid", "status", "summary", "blocking", "assumed",
-               "outside_scope_needed", "paths", "spec_gaps", "worker_checks", "acceptance", "proofs", "diff")
+               "outside_scope_needed", "risk_notes", "rendered_diff", "paths", "spec_gaps", "worker_checks",
+               "acceptance", "proofs", "diff")
 
 
 def render_json(data):

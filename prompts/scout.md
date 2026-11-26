@@ -27,12 +27,19 @@ the code it names. Use `rg`/`grep`, `git log`, `git grep` and reading files. You
 
 Facts only, each with a path (and line where it helps). If you could not check something, say so rather than guess.
 
+## Live state and `state.md` (optional)
+When `{{STATE_OUT}}` is not empty, read the host-provided live state snapshot at `{{LIVE_STATE}}` (skip it when it is
+`none`), compare it with what the repository declares (manifests, modules, policies, config), and write
+`{{STATE_OUT}}` as clean Markdown: live vs git drift, hidden coupling files, invariants the change must keep, and
+open decisions. Put one line per drift item in the optional `"drift"` array of `{{OUT}}`.
+
 ## Output
 Write `{{OUT}}` (valid JSON only), then stop:
 ```json
 {
   "task": "{{TASK}}",
   "named": [{"spec_says": "what the spec names", "found": true, "actual": "path:line where it really is", "note": ""}],
+  "drift": ["live state differs from git: what and where"],
   "files_to_change": [{"path": "path", "why": "what changes there", "in_spec": true}],
   "tests_affected": [{"path": "path", "test": "TestName or description", "why": "what it asserts that changes"}],
   "patterns": [{"path": "path", "what": "the example to copy"}],

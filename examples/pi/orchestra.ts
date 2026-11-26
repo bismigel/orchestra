@@ -123,13 +123,22 @@ export default function (pi) {
       "to paste into Touches. Costs cents. You decide what goes into the spec.",
     parameters: Type.Object({
       task: Type.String({ description: "Task id, e.g. T56" }),
-      spec: Type.String({ description: "Path to the draft spec markdown" }),
+      spec: Type.Optional(Type.String({ description: "Path to the draft spec markdown" })),
+      prompt: Type.Optional(Type.String({ description: "Inline scout prompt instead of a spec file" })),
+      state: Type.Optional(Type.Boolean({ description: "Include the scout's state.md in the result" })),
       cwd: cwdParam,
     }),
     async execute(_id, p, signal, onUpdate, ctx) {
       const cwd = p.cwd || process.cwd();
+      if (!p.spec && !p.prompt) {
+        return textResult(`orchestra scout ${p.task}`, 2, "provide spec or prompt");
+      }
+      const args = ["scout", p.task];
+      if (p.spec) args.push("--spec", p.spec);
+      if (p.prompt) args.push("--prompt", p.prompt);
+      if (p.state) args.push("--state");
       const upd = progressUpdater(onUpdate, `scout ${p.task}…`);
-      const { code, out, err } = await runOW(["scout", p.task, "--spec", p.spec], cwd, signal, upd);
+      const { code, out, err } = await runOW(args, cwd, signal, upd);
       safeNotify(ctx, `orchestra scout ${p.task} exited ${code}`, code === 0 ? "info" : "error");
       const text = tail(out + (code === 0 ? "" : "\n" + withoutProgress(err, `scout:${p.task}`)), 8000);
       return textResult(`orchestra scout ${p.task}`, code, text);
@@ -148,6 +157,7 @@ export default function (pi) {
     parameters: Type.Object({
       task: Type.String({ description: "Task id, e.g. T56" }),
       spec: Type.Optional(Type.String({ description: "Path to the task spec markdown (first run)" })),
+      prompt: Type.Optional(Type.String({ description: "Extra inline instructions for this run" })),
       feedback: Type.Optional(Type.String({ description: "Path to a feedback file (follow-up round)" })),
       allowStale: Type.Optional(Type.Boolean({ description: "Run even though the spec changed on the base" })),
       worktree: wtParam,
@@ -157,6 +167,7 @@ export default function (pi) {
       const cwd = p.cwd || process.cwd();
       const args = ["run", p.task];
       if (p.spec) args.push("--spec", p.spec);
+      if (p.prompt) args.push("--prompt", p.prompt);
       if (p.feedback) args.push("--feedback", p.feedback);
       if (p.allowStale) args.push("--allow-stale");
       if (p.worktree) args.push("--worktree", p.worktree);
@@ -165,6 +176,49 @@ export default function (pi) {
       safeNotify(ctx, `orchestra run ${p.task} exited ${code}`, code === 0 ? "info" : "error");
       const all = (out || "") + (err || "");
       return textResult(`orchestra run ${p.task}`, code, card(withoutProgress(all, p.task)));
+    },
+  });
+
+  // ---- artifact ------------------------------------------------------------------------------------
+  pi.registerTool({
+    name: "orchestra_artifact",
+    label: "orchestra artifact",
+    description:
+      "Render one task's run or scout into a self-contained HTML review artifact: report, BLOCKING questions, risk " +
+      "notes, proofs, spec, state and source/rendered diffs. Saves it in the local artifacts folder with an " +
+      "index.html (and publishes to the Artifact Server when one is configured). Returns the artifact URL or " +
+      "local file:// path and the index path.",
+    parameters: Type.Object({
+      task: Type.String({ description: "Task id, e.g. T56" }),
+      local: Type.Optional(Type.Boolean({ description: "Force the local folder even when a server is configured" })),
+      open: Type.Optional(Type.Boolean({ description: "Open the artifact after saving it" })),
+      worktree: wtParam,
+      cwd: cwdParam,
+    }),
+    async execute(_id, p, signal) {
+      const cwd = p.cwd || process.cwd();
+      const args = ["artifact", p.task];
+      if (p.local) args.push("--local");
+      if (p.open) args.push("--open");
+      if (p.worktree) args.push("--worktree", p.worktree);
+      const { code, out, err } = await runOW(args, cwd, signal);
+      const text = tail((out || "") + (err ? "\n" + err : ""), TAIL);
+      const pick = (label) => {
+        const m = text.match(new RegExp("^" + label + ": (.+)$", "m"));
+        return m ? m[1].trim() : undefined;
+      };
+      const remote = pick("remote artifact");
+      const localPath = pick("local artifact");
+      const index = pick("index");
+      const target = remote || (localPath ? `file://${localPath}` : undefined);
+      const summary = [target ? `artifact: ${target}` : "", index ? `index: ${index}` : ""]
+        .filter(Boolean)
+        .join("\n");
+      return textResult(`orchestra artifact ${p.task}`, code, (summary ? summary + "\n\n" : "") + text, {
+        url: remote,
+        path: localPath,
+        index,
+      });
     },
   });
 

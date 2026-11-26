@@ -62,7 +62,7 @@ def main(argv):
         return invalid("not a JSON object")
     if report.get("task") != task:
         return invalid(f"task is {report.get('task')!r}, expected {task!r}")
-    for key in ("named", "files_to_change", "tests_affected", "patterns", "commands", "undecided"):
+    for key in ("named", "files_to_change", "tests_affected", "patterns", "commands", "undecided", "drift"):
         if key in report and not isinstance(report[key], list):
             return invalid(f"{key} is not a list")
     if "size" in report and not isinstance(report["size"], dict):
@@ -82,6 +82,12 @@ def main(argv):
             if e.get("note"):
                 line += f" ({short(e['note'])})"
             print(line)
+
+    drift = [str(item) for item in (report.get("drift") or [])]
+    if drift:
+        print(f"{'drift':<11}{len(drift)} live/git difference(s)")
+        for item in drift:
+            print(f"  - {short(item)}")
 
     files = entry_list(report.get("files_to_change") or [])
     if files:
