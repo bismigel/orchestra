@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# orchestra/auto router: offline unit tests for the pure routing helpers, and orchestra-worker integration for
+# orchestra/auto router (one model, thinking level only): offline unit tests for the pure routing helpers, and orchestra-worker integration for
 # ORCHESTRA_ROUTER_EXT. No model calls and no network.
 set -uo pipefail
 ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
@@ -33,38 +33,48 @@ const eq = (a, b, what = "value") => assert.deepEqual(a, b, `${what}: got ${JSON
 const user = (text) => ({ role: "user", content: text });
 const tool = (text, extra = {}) => ({ role: "toolResult", toolName: "bash", content: text, ...extra });
 const assistant = (usage) => ({ role: "assistant", content: "ok", usage });
-const cfg = { strong: "p/strong", fast: "p/fast", softBudget: 1.5, hardBudget: 4, ctxPressure: 0.7 };
-const prevStrongHigh = { model: cfg.strong, thinkingLevel: "high" };
+const cfg = { model: "p/model", softBudget: 1.5, hardBudget: 4, ctxPressure: 0.7 };
+const prevHigh = { model: cfg.model, thinkingLevel: "high" };
 
-await t("direct routes to fast:off", () => {
+await t("direct routes to the same model with thinking off", () => {
   const r = m.decideRoute({ reason: "direct", config: cfg });
-  eq(r.model, cfg.fast, "model");
+  eq(r.model, cfg.model, "model");
   eq(r.thinkingLevel, "off", "thinking");
 });
-await t("defaults are the documented physical models", () => {
-  const r = m.decideRoute({ reason: "direct" });
-  eq(r.model, "deepseek/deepseek-flash", "default fast");
+await t("defaults are the documented physical models, one per profile", () => {
+  eq(m.readRouterConfig({}, "ds").model, "deepseek/deepseek-v4-pro", "ds");
+  eq(m.readRouterConfig({}, "flash").model, "deepseek/deepseek-flash", "flash");
+  eq(m.readRouterConfig({}, "cb").model, "claude-bridge/claude-opus-5-5", "cb");
   const s = m.decideRoute({ reason: "user", messages: [user("add a helper")] });
-  eq(s.model, "deepseek/deepseek-v4-pro", "default strong");
+  eq(s.model, "deepseek/deepseek-v4-pro", "default model");
 });
-await t("routine prompt routes to fast:off", () => {
+await t("the model never depends on the tier", () => {
+  for (const prompt of ["status please", "add a small helper function in src/greet.ts", "investigate the security incident across the network and cnpg"]) {
+    eq(m.decideRoute({ reason: "user", messages: [user(prompt)], config: cfg }).model, cfg.model, prompt);
+  }
+});
+await t("ORCHESTRA_ROUTER_MODEL pins the model; _STRONG is an alias; _FAST is ignored", () => {
+  eq(m.readRouterConfig({ ORCHESTRA_ROUTER_MODEL: "a/b" }, "ds").model, "a/b", "MODEL");
+  eq(m.readRouterConfig({ ORCHESTRA_ROUTER_STRONG: "a/c" }, "ds").model, "a/c", "STRONG alias");
+  eq(m.readRouterConfig({ ORCHESTRA_ROUTER_MODEL: "a/b", ORCHESTRA_ROUTER_STRONG: "a/c" }, "ds").model, "a/b", "MODEL wins");
+  eq(m.readRouterConfig({ ORCHESTRA_ROUTER_FAST: "a/d" }, "ds").model, "deepseek/deepseek-v4-pro", "FAST ignored");
+  eq(m.readRouterConfig({ ORCHESTRA_ROUTER_CB_MODEL: "a/e" }, "cb").model, "a/e", "profile prefix");
+});
+await t("routine prompt gets thinking off", () => {
   const r = m.decideRoute({ reason: "user", messages: [user("status please")], config: cfg });
-  eq(r.model, cfg.fast, "model");
   eq(r.thinkingLevel, "off", "thinking");
 });
-await t("standard prompt routes to strong:low", () => {
+await t("standard prompt gets thinking low", () => {
   const r = m.decideRoute({ reason: "user", messages: [user("add a small helper function in src/greet.ts")], config: cfg });
-  eq(r.model, cfg.strong, "model");
   eq(r.thinkingLevel, "low", "thinking");
 });
-await t("deep prompt routes to strong:medium", () => {
+await t("deep prompt gets thinking medium", () => {
   const r = m.decideRoute({ reason: "user", messages: [user("investigate the security incident across the network and cnpg")], config: cfg });
-  eq(r.model, cfg.strong, "model");
   eq(r.thinkingLevel, "medium", "thinking");
 });
 await t("deep prompt escalates to high only on an explicit high virtual level", () => {
   const r = m.decideRoute({ reason: "user", messages: [user("investigate the security incident across the network and cnpg")], virtualLevel: "high", config: cfg });
-  eq(r.model, cfg.strong, "model");
+  eq(r.model, cfg.model, "model");
   eq(r.thinkingLevel, "high", "thinking");
 });
 await t("classifyDeterministic scores routine and high-judgment words", () => {
@@ -77,97 +87,75 @@ await t("virtual low biases a short standard prompt to routine; high biases it t
   eq(m.classifyDeterministic("adjust the parser", "", "high"), "deep", "high");
 });
 
-await t("continuation stays sticky and steps thinking down after three clean tools", () => {
+await t("continuation keeps the model and steps thinking down after three clean tools", () => {
   const messages = [user("go"), tool("exit 0"), tool("ok"), tool("done")];
-  const r = m.decideRoute({ reason: "continuation", previous: prevStrongHigh, messages, config: cfg, state: { tier: "standard", consecutiveCleanTools: 2 } });
-  eq(r.model, cfg.strong, "model");
+  const r = m.decideRoute({ reason: "continuation", previous: prevHigh, messages, config: cfg, state: { tier: "standard", consecutiveCleanTools: 2 } });
+  eq(r.model, cfg.model, "model");
   eq(r.thinkingLevel, "medium", "thinking");
   eq(r.state.consecutiveCleanTools, 3, "clean tools");
 });
 for (const [label, text] of [["BLOCKING", "BLOCKING: choose a database"], ["RISK NOTES", "RISK NOTES\nrotate the key"], ["FAIL", "FAIL test_parser"], ["non-zero exit", "command failed: exit 2"]]) {
   t(`continuation resets and keeps thinking up on ${label}`, () => {
     const messages = [user("go"), tool("exit 0"), tool(text)];
-    const r = m.decideRoute({ reason: "continuation", previous: { model: cfg.strong, thinkingLevel: "low" }, messages, config: cfg });
-    eq(r.model, cfg.strong, "model stays");
-    eq(r.thinkingLevel, "medium", "strong thinking at least medium");
+    const r = m.decideRoute({ reason: "continuation", previous: { model: cfg.model, thinkingLevel: "low" }, messages, config: cfg, state: { tier: "standard" } });
+    eq(r.model, cfg.model, "model stays");
+    eq(r.thinkingLevel, "medium", "thinking at least medium");
     eq(r.state.consecutiveCleanTools, 0, "clean tools reset");
   });
 }
-await t("continuation keeps fast thinking at least low after a failure", () => {
+await t("continuation after a failure on a routine turn only needs thinking low", () => {
   const messages = [user("go"), tool("exit 1")];
-  const r = m.decideRoute({ reason: "continuation", previous: { model: cfg.fast, thinkingLevel: "off" }, messages, config: cfg });
-  eq(r.thinkingLevel, "low", "fast thinking at least low");
+  const r = m.decideRoute({ reason: "continuation", previous: { model: cfg.model, thinkingLevel: "off" }, messages, config: cfg, state: { tier: "routine" } });
+  eq(r.model, cfg.model, "model stays");
+  eq(r.thinkingLevel, "low", "thinking at least low");
 });
 
-await t("retry fails strong over to fast medium on an overload error", () => {
-  const r = m.decideRoute({ reason: "retry", failed: { model: cfg.strong, thinkingLevel: "high", message: { errorMessage: "HTTP 429 rate limit" } }, config: cfg });
-  eq(r.model, cfg.fast, "model");
-  eq(r.thinkingLevel, "medium", "thinking");
+await t("retry never changes the model, even on an overload error", () => {
+  for (const errorMessage of ["HTTP 429 rate limit", "provider overloaded (503)", "invalid api key"]) {
+    const r = m.decideRoute({ reason: "retry", failed: { model: "p/other", thinkingLevel: "high", message: { errorMessage } }, config: cfg });
+    eq(r.model, "p/other", `model after: ${errorMessage}`);
+    eq(r.thinkingLevel, "high", `thinking after: ${errorMessage}`);
+  }
 });
-await t("retry fails fast over to strong medium on 503 overload", () => {
-  const r = m.decideRoute({ reason: "retry", failed: { model: cfg.fast, thinkingLevel: "low", message: { errorMessage: "provider overloaded (503)" } }, config: cfg });
-  eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "medium", "thinking");
-});
-await t("retry stays sticky on a non-overload error", () => {
-  const r = m.decideRoute({ reason: "retry", failed: { model: cfg.strong, thinkingLevel: "high", message: { errorMessage: "invalid api key" } }, config: cfg });
-  eq(r.model, cfg.strong, "model");
+await t("retry without a failed request sticks to the previous route", () => {
+  const r = m.decideRoute({ reason: "retry", previous: prevHigh, config: cfg });
+  eq(r.model, cfg.model, "model");
   eq(r.thinkingLevel, "high", "thinking");
 });
-await t("isOverloadError matches the documented family only", () => {
-  for (const s of ["429", "503", "529", "overloaded", "rate-limit", "rate limit", "capacity", "temporarily unavailable"]) eq(m.isOverloadError(s), true, s);
-  eq(m.isOverloadError("invalid api key"), false, "api key");
+await t("isOverloadError is gone: nothing fails over any more", () => {
+  eq(m.isOverloadError, undefined, "export");
 });
 
 await t("soft budget steps a standard turn down one notch", () => {
   const r = m.decideRoute({ reason: "user", tier: "standard", messages: [user("implement the helper")], usage: { cost: 2, contextPct: 0.2 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
+  eq(r.model, cfg.model, "model");
   eq(r.thinkingLevel, "off", "thinking");
 });
 await t("context pressure steps a standard turn down one notch", () => {
   const r = m.decideRoute({ reason: "user", tier: "standard", messages: [user("implement the helper")], usage: { cost: 0.2, contextPct: 0.8 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
+  eq(r.model, cfg.model, "model");
   eq(r.thinkingLevel, "off", "thinking");
 });
 await t("soft budget leaves a deep turn alone", () => {
   const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], usage: { cost: 2, contextPct: 0.2 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
   eq(r.thinkingLevel, "medium", "thinking");
 });
 await t("soft budget caps a deep high turn at medium", () => {
   const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], virtualLevel: "high", usage: { cost: 2, contextPct: 0.2 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
   eq(r.thinkingLevel, "medium", "thinking");
 });
 await t("context pressure caps a deep high turn at medium", () => {
   const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], virtualLevel: "high", usage: { cost: 0.2, contextPct: 0.8 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
   eq(r.thinkingLevel, "medium", "thinking");
 });
-await t("hard budget demotes standard to fast:low", () => {
-  const r = m.decideRoute({ reason: "user", tier: "standard", messages: [user("implement the helper")], usage: { cost: 5, contextPct: 0.2 }, config: cfg });
-  eq(r.model, cfg.fast, "model");
-  eq(r.thinkingLevel, "low", "thinking");
-});
-await t("hard budget demotes routine to fast:off", () => {
-  const r = m.decideRoute({ reason: "user", tier: "routine", messages: [user("status")], usage: { cost: 5, contextPct: 0.2 }, config: cfg });
-  eq(r.model, cfg.fast, "model");
-  eq(r.thinkingLevel, "off", "thinking");
-});
-await t("hard budget preserves strong for deep turns", () => {
-  const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], virtualLevel: "high", usage: { cost: 5, contextPct: 0.2 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "low", "thinking");
-});
-await t("cache hysteresis keeps strong for a borderline standard turn with large context", () => {
-  const r = m.decideRoute({ reason: "user", tier: "standard", previous: prevStrongHigh, messages: [user("implement the helper")], usage: { cost: 5, contextPct: 0.25, contextTokens: 50000 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "low", "thinking");
-});
-await t("cache hysteresis does not keep strong for a clear routine turn", () => {
-  const r = m.decideRoute({ reason: "user", tier: "routine", previous: prevStrongHigh, messages: [user("status")], usage: { cost: 5, contextPct: 0.25, contextTokens: 50000 }, config: cfg });
-  eq(r.model, cfg.fast, "model");
-  eq(r.thinkingLevel, "off", "thinking");
+await t("hard budget caps standard, deep and routine thinking and never changes the model", () => {
+  const usage = { cost: 5, contextPct: 0.25, contextTokens: 50000 };
+  const std = m.decideRoute({ reason: "user", tier: "standard", previous: prevHigh, messages: [user("implement the helper")], usage, config: cfg });
+  eq([std.model, std.thinkingLevel], [cfg.model, "low"], "standard");
+  const routine = m.decideRoute({ reason: "user", tier: "routine", previous: prevHigh, messages: [user("status")], usage, config: cfg });
+  eq([routine.model, routine.thinkingLevel], [cfg.model, "off"], "routine");
+  const deep = m.decideRoute({ reason: "user", tier: "deep", previous: prevHigh, messages: [user("security review")], virtualLevel: "high", usage, config: cfg });
+  eq([deep.model, deep.thinkingLevel], [cfg.model, "low"], "deep");
 });
 
 await t("summarizeUsage sums cost and tokens, cache hit and context percent", () => {
@@ -240,42 +228,36 @@ await t("a blocking tool result is deep before any classifier call", async () =>
 
 // Pi passes catalog Model objects (not "provider/id" strings) in request.previous.model and request.failed.model.
 const modelObj = (ref) => { const [provider, id] = ref.split("/"); return { provider, id, name: id, api: "x" }; };
-await t("continuation accepts a Model object in previous and stays sticky", () => {
-  const r = m.decideRoute({ reason: "continuation", previous: { model: modelObj(cfg.strong), thinkingLevel: "high" }, messages: [user("go")], config: cfg });
-  eq(r.model, cfg.strong, "model");
+await t("continuation accepts a Model object in previous and stays on it", () => {
+  const r = m.decideRoute({ reason: "continuation", previous: { model: modelObj(cfg.model), thinkingLevel: "high" }, messages: [user("go")], config: cfg });
+  eq(r.model, cfg.model, "model");
   eq(r.thinkingLevel, "high", "thinking");
-  eq(r.state.lastModel, cfg.strong, "state stores the string ref");
+  eq(r.state.lastModel, cfg.model, "state stores the string ref");
 });
-await t("retry accepts a Model object in failed and fails over on overload", () => {
-  const r = m.decideRoute({ reason: "retry", failed: { model: modelObj(cfg.strong), thinkingLevel: "high", message: { errorMessage: "HTTP 529 overloaded" } }, config: cfg });
-  eq(r.model, cfg.fast, "model");
-});
-await t("retry accepts a Model object in failed and stays sticky otherwise", () => {
-  const r = m.decideRoute({ reason: "retry", failed: { model: modelObj(cfg.fast), thinkingLevel: "low", message: { errorMessage: "invalid api key" } }, config: cfg });
-  eq(r.model, cfg.fast, "model");
+await t("retry accepts a Model object in failed and keeps its model and level", () => {
+  const r = m.decideRoute({ reason: "retry", failed: { model: modelObj(cfg.model), thinkingLevel: "low", message: { errorMessage: "HTTP 529 overloaded" } }, config: cfg });
+  eq(r.model, cfg.model, "model");
   eq(r.thinkingLevel, "low", "thinking");
 });
-await t("user turn with a Model object in previous keeps cache hysteresis", () => {
-  const r = m.decideRoute({ reason: "user", tier: "standard", previous: { model: modelObj(cfg.strong), thinkingLevel: "high" }, messages: [user("implement the helper")], usage: { cost: 5, contextPct: 0.25, contextTokens: 50000 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
-});
 await t("route() resolves Model objects from Pi's previous/failed through the registry", async () => {
-  const saved = { s: process.env.ORCHESTRA_ROUTER_STRONG, f: process.env.ORCHESTRA_ROUTER_FAST };
-  process.env.ORCHESTRA_ROUTER_STRONG = cfg.strong;
-  process.env.ORCHESTRA_ROUTER_FAST = cfg.fast;
+  const saved = process.env.ORCHESTRA_ROUTER_MODEL;
+  process.env.ORCHESTRA_ROUTER_MODEL = cfg.model;
   let vm;
   try {
-    m.default({ registerVirtualModel: (d) => { vm = d; }, registerCommand: () => {} });
+    m.default({ registerVirtualModel: (d) => { if (d.id === "auto") vm = d; }, registerCommand: () => {} });
   } finally {
-    if (saved.s === undefined) delete process.env.ORCHESTRA_ROUTER_STRONG; else process.env.ORCHESTRA_ROUTER_STRONG = saved.s;
-    if (saved.f === undefined) delete process.env.ORCHESTRA_ROUTER_FAST; else process.env.ORCHESTRA_ROUTER_FAST = saved.f;
+    if (saved === undefined) delete process.env.ORCHESTRA_ROUTER_MODEL; else process.env.ORCHESTRA_ROUTER_MODEL = saved;
   }
-  const catalog = [modelObj(cfg.strong), modelObj(cfg.fast)];
+  const catalog = [modelObj(cfg.model)];
   const ctx = { modelRegistry: { find: (p, id) => catalog.find((c) => c.provider === p && c.id === id) } };
   const cont = await vm.route({ reason: "continuation", thinkingLevel: "medium", messages: [user("go")], previous: { model: catalog[0], thinkingLevel: "high" } }, ctx);
   eq(cont.model, catalog[0], "continuation model");
-  const retry = await vm.route({ reason: "retry", thinkingLevel: "medium", messages: [user("go")], failed: { model: catalog[1], thinkingLevel: "low", message: { errorMessage: "invalid api key" } } }, ctx);
-  eq(retry.model, catalog[1], "retry model");
+  const retry = await vm.route({ reason: "retry", thinkingLevel: "medium", messages: [user("go")], failed: { model: catalog[0], thinkingLevel: "low", message: { errorMessage: "invalid api key" } } }, ctx);
+  eq(retry.model, catalog[0], "retry model");
+  const bare = { modelRegistry: { find: () => null } };
+  let msg = "";
+  try { await vm.route({ reason: "user", thinkingLevel: "medium", messages: [user("go")] }, bare); } catch (e) { msg = String(e.message); }
+  eq(/is not in the catalog/.test(msg), true, "a missing model is a setup error, not a silent switch");
 });
 console.log(`part1: ${pass} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);
