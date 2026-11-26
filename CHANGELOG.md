@@ -1,6 +1,15 @@
 # Changelog
 
 ## 0.8.0 (unreleased)
+- **Jev, an advisory second opinion** (`ORCHESTRA_JEV=off|shadow|advise`, off by default; [docs/jev.md](docs/jev.md)).
+`orchestra-worker decide split|ready|triage` asks a classifier model (Jev on Cloudflare Workers AI, or any endpoint
+speaking the same body) three typed questions from `config/decisions.json`: worker, split or orchestrator for a spec;
+five yes/no readiness checks; clean, look or block for a finished run. `run --spec` asks `split` and `ready`, text
+`review` asks `triage`. Jev can only ask for a closer look: `triage` has a deterministic floor from the review facts,
+and a verdict below it is never shown. State is whitelisted, redacted and capped; the token comes from
+`ORCHESTRA_JEV_KEY_CMD`, never a file, log or output; a failure is logged and never changes an exit code. Answers go
+to `<git dir>/orchestra/decisions.jsonl`; `decide mark` records your call and `decide report` compares the two.
+New: `lib/decide.py`, `config/decisions.json`, `tests/decide.sh`, `orchestra-worker guide jev`.
 - **The router no longer switches models** (`examples/pi/orchestra-router.ts`): every profile has one physical model
 and only the thinking level varies per turn. A model swap makes the next model reread the whole context at full price
 (prompt caches are per model). Removed: the strong/fast pair, the hard-budget demotion to the fast model, cache

@@ -46,3 +46,6 @@ printed by `orchestra-worker guide orchestrator`; the essentials:
    append them to the lessons file (refine reads it). `review` shows `lessons N spec gap(s)` when there are any.
    Afterwards `orchestra-worker clean` lists worktrees that can go (`--yes` archives each to the ledger, then
    removes it); `orchestra-worker history` shows every task's runs and cost, cleaned-up ones included.
+   If `ORCHESTRA_JEV` is `shadow` or `advise`, a Jev line may appear after `run --spec` or `review`: it is a second
+   opinion that can only ask you to look harder, never a reason to look less. Record your own call with
+   `orchestra-worker decide mark <id> <kind> <value>`; `orchestra-worker decide report` compares the two (`guide jev`).

@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "kinds": {
+    "split": {
+      "min_confidence": 0.8,
+      "questions": {
+        "route": {
+          "type": "choice",
+          "instructions": "Who should do the work described in `spec`? Delegate to a cheap worker only when every decision is already made and the work is mechanical. When in doubt it is not a worker task.",
+          "criteria": {
+            "worker": "Settled and mechanical: decisions written as rules, files named, tests listed, nothing left to the implementer's judgment",
+            "split": "Mostly mechanical but part of it needs a decision first, or the spec leaves open questions or ambiguous requirements",
+            "orchestrator": "Needs judgment throughout: design, security, auth, money, data or schema, a contract or public interface, or irreversible or risky changes"
+          }
+        }
+      }
+    },
+    "ready": {
+      "min_probability": 0.5,
+      "questions": {
+        "decisions": {
+          "type": "bool",
+          "instructions": "Does `spec` state every design decision as a rule, leaving none for the implementer to decide?",
+          "criteria": { "true": "All decisions are written down", "false": "Some decision is missing or left to the implementer" }
+        },
+        "tests": {
+          "type": "bool",
+          "instructions": "Does `spec` list concrete test cases, including the risky or edge cases?",
+          "criteria": { "true": "Concrete test cases are listed", "false": "No concrete test cases, or only the happy path" }
+        },
+        "paths": {
+          "type": "bool",
+          "instructions": "Does `spec` name the files or directories the change may touch?",
+          "criteria": { "true": "The files or directories are named", "false": "The files or directories are not named" }
+        },
+        "proof": {
+          "type": "bool",
+          "instructions": "Does `spec` give an executable command that proves the task is done?",
+          "criteria": { "true": "An executable proof command is given", "false": "No executable proof command" }
+        },
+        "scope": {
+          "type": "bool",
+          "instructions": "Does `spec` say what is out of scope?",
+          "criteria": { "true": "An out-of-scope section or statement exists", "false": "Nothing says what is out of scope" }
+        }
+      }
+    },
+    "triage": {
+      "questions": {
+        "verdict": {
+          "type": "choice",
+          "instructions": "`review` is the digest of a cheap worker's finished run. How much attention does the orchestrator owe it before landing? The worker's own claims are not proof: judge the facts (failing or missing proofs, open questions, files outside the spec, risk notes), not how confident the summary sounds.",
+          "criteria": {
+            "clean": "Done, proofs pass, nothing outside the spec, no open questions or risk notes",
+            "look": "Probably fine but the orchestrator should read the diff: assumptions made, small spec gaps, risk notes, proofs not yet run",
+            "block": "Do not land: failed checks or proofs, blocking questions, work outside the spec, or an incomplete or invalid report"
+          }
+        }
+      }
+    }
+  }
+}

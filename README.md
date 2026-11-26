@@ -249,6 +249,9 @@ picks a thinking level per turn on one fixed model (it never switches models, wh
 context) — `orchestra/ds-auto`, `gemini-auto`, `claude-auto`, `cb-auto` (Claude via Claude Code and a
 subscription), and `flash-auto` for workers;
 see [docs/router.md](docs/router.md) for the profiles, the frugal thinking levels and the benchmark behind them.
+An optional second opinion from a classifier model (Jev) flags specs that may not be settled and runs that deserve a
+closer look (`orchestra-worker decide`); it can only raise attention, and is off by default: see
+[docs/jev.md](docs/jev.md).
 Other orchestrators: reference `docs/orchestrator-guide.md` from their `AGENTS.md`.
 
 ## Status
