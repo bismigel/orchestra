@@ -1,6 +1,14 @@
 # Changelog
 
 ## 0.8.0 (unreleased)
+- **The router no longer switches models** (`examples/pi/orchestra-router.ts`): every profile has one physical model
+and only the thinking level varies per turn. A model swap makes the next model reread the whole context at full price
+(prompt caches are per model). Removed: the strong/fast pair, the hard-budget demotion to the fast model, cache
+hysteresis, failover to the other model on a provider overload (a retry now keeps the failed request's model), and
+`isOverloadError`. A model missing from the catalog is now a setup error. `ORCHESTRA_ROUTER_MODEL` (and
+`ORCHESTRA_ROUTER_<PROFILE>_MODEL`) pins the model; `ORCHESTRA_ROUTER_STRONG` still works as an alias and
+`ORCHESTRA_ROUTER_FAST` is ignored. Defaults: `ds-auto` runs `deepseek-v4-pro` throughout (it used Flash for routine
+turns), `claude-auto` Opus, `gemini-auto` Carbon. Spend and context pressure now only lower the thinking level.
 - **`prove` records a candidate snapshot** in `.orchestra/candidate.json`: task, run, base and the commit it resolved
 to, the tree hash the proofs bound to, the spec and its blob hash, and the time. `review` shows a `candidate:` line,
 and both `review` (text and `--json`) and `land` report `candidate drift` with a stat when the worktree changed since.

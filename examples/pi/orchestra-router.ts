@@ -1,9 +1,9 @@
-// orchestra/auto: a Pi virtual model that routes each request to a physical model and thinking level.
+// orchestra/auto: a Pi virtual model that picks a thinking level for each request on ONE physical model.
 //
-// The orchestrating model is expensive; most worker turns are not. This router sends obvious work to the fast
-// model with little or no thinking, keeps hard/risky work on the strong model, and never changes the physical
-// model mid-turn (the prompt cache and thinking signatures stay valid). Session spend and context usage are
-// respected, and an optional classifier model can make the tier call before the deterministic scorer does.
+// The model never changes: switching models makes the next model read the whole context again at full price (prompt
+// caches are per model) and drops its thinking blocks. Only the thinking level moves. Obvious work gets little or
+// no thinking, hard/risky work gets more, and session spend and context usage pull the level down. An optional
+// classifier model can make the tier call before the deterministic scorer does.
 //
 // Install: link this file into ~/.pi/agent/extensions/ (or start pi with `-e ./orchestra-router.ts`) and select
 // `orchestra/auto`. In orchestra-worker, set ORCHESTRA_MODEL=orchestra/auto and ORCHESTRA_ROUTER_EXT=<this file>.
@@ -13,28 +13,28 @@
 // directly for tests.
 // @ts-nocheck
 
-const DEFAULT_STRONG = "deepseek/deepseek-v4-pro";
-const DEFAULT_FAST = "deepseek/deepseek-flash";
+const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
+const FLASH_MODEL = "deepseek/deepseek-flash";
 const DEFAULT_SOFT_BUDGET = 1.5;
 const DEFAULT_HARD_BUDGET = 4.0;
 const DEFAULT_CTX_PRESSURE = 0.7;
 
-// One profile per model family. The orchestrator picks a profile (orchestra/<family>-auto) and the router
-// dispatches each turn to that family's strong/fast pair. Budgets and context pressure are shared: they are
-// session economics, not model-family properties.
+// One profile per model family, each with exactly one physical model. The orchestrator picks a profile
+// (orchestra/<family>-auto) and the router only varies the thinking level on that model. Budgets and context
+// pressure are shared: they are session economics, not model-family properties.
 const PROFILE_DEFAULTS = {
-  ds: { strong: DEFAULT_STRONG, fast: DEFAULT_FAST, tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high", "xhigh"] },
-  gemini: { strong: "antigravity/gemini-4-carbon", fast: "antigravity/gemini-4-hydrogen", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
-  claude: { strong: "antigravity/claude-opus-5-5", fast: "antigravity/claude-sonnet-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
+  ds: { model: DEFAULT_MODEL, tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high", "xhigh"] },
+  gemini: { model: "antigravity/gemini-4-carbon", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
+  claude: { model: "antigravity/claude-opus-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
   // Anthropic models reached through Claude Code and the user's Claude subscription (pi-claude-bridge), not through
   // Antigravity. Same thinking ladder as the antigravity claude profile: the bridge forwards the level to Claude Code.
-  cb: { strong: "claude-bridge/claude-opus-5-5", fast: "claude-bridge/claude-sonnet-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
-  // Single-model profile for orchestra workers: every tier runs on Flash. Flash has no "medium" thinking tier
-  // (its catalog map is off/low/high), so "deep" maps straight to "high" — thinking is the only knob.
-  flash: { strong: DEFAULT_FAST, fast: DEFAULT_FAST, tiers: { routine: "off", standard: "low", deep: "high" }, levels: ["off", "low", "high"] },
+  cb: { model: "claude-bridge/claude-opus-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
+  // Profile for orchestra workers: always Flash. Flash has no "medium" thinking tier (its catalog map is
+  // off/low/high), so "deep" maps straight to "high".
+  flash: { model: FLASH_MODEL, tiers: { routine: "off", standard: "low", deep: "high" }, levels: ["off", "low", "high"] },
 };
-// Virtual-model id -> profile key. "auto" is the legacy id and stays the DeepSeek profile so existing
-// ORCHESTRA_ROUTER_STRONG/FAST pins keep their meaning; "flash-auto" is the worker profile (always Flash).
+// Virtual-model id -> profile key. "auto" is the legacy id and stays the DeepSeek profile so an existing
+// ORCHESTRA_ROUTER_STRONG pin keeps working; "flash-auto" is the worker profile (always Flash).
 const PROFILE_BY_ID = {
   auto: "ds",
   "ds-auto": "ds",
@@ -51,7 +51,8 @@ const NONZERO_EXIT = /\bexit(?:\s+code)?\s*[:=]?\s*[1-9]\d*\b/i;
 
 /**
  * Read the router's optional configuration for one profile. All values have safe defaults. The ds profile reads
- * the legacy ORCHESTRA_ROUTER_STRONG/FAST vars; the others read ORCHESTRA_ROUTER_<PROFILE>_STRONG/FAST.
+ * ORCHESTRA_ROUTER_MODEL; the others read ORCHESTRA_ROUTER_<PROFILE>_MODEL. The old _STRONG pin still works as an
+ * alias; the old _FAST pin is ignored (there is no second model any more).
  */
 export function readRouterConfig(env = process.env, profile = "ds") {
   const number = (name, fallback) => {
@@ -63,8 +64,7 @@ export function readRouterConfig(env = process.env, profile = "ds") {
   const prefix = profile === "ds" ? "ORCHESTRA_ROUTER" : `ORCHESTRA_ROUTER_${profile.toUpperCase()}`;
   return {
     profile,
-    strong: env[`${prefix}_STRONG`] || defs.strong,
-    fast: env[`${prefix}_FAST`] || defs.fast,
+    model: env[`${prefix}_MODEL`] || env[`${prefix}_STRONG`] || defs.model,
     classifier: env.ORCHESTRA_ROUTER_CLASSIFIER || "",
     softBudget: number("ORCHESTRA_ROUTER_SOFT_BUDGET", DEFAULT_SOFT_BUDGET),
     hardBudget: number("ORCHESTRA_ROUTER_HARD_BUDGET", DEFAULT_HARD_BUDGET),
@@ -83,6 +83,10 @@ export function stepThinkingDown(level, steps = 1) {
 
 function atLeast(level, minimum) {
   return LEVELS.indexOf(level) >= LEVELS.indexOf(minimum) ? level : minimum;
+}
+
+function atMost(level, maximum) {
+  return LEVELS.indexOf(level) <= LEVELS.indexOf(maximum) ? level : maximum;
 }
 
 /** Clamp a level to the nearest level a profile's physical models offer (frugal: never raise the request). */
@@ -326,11 +330,12 @@ export async function chooseTier(options = {}) {
 // Frugal by default: reasoning is a cost, so spend it only where it pays. Each profile's `tiers` map gives the
 // thinking level for routine/standard/deep work; the flash profile (workers) has no medium tier, so its deep maps
 // straight to high. An explicit high virtual level still escalates a deep turn one notch where the profile allows.
+// The model is always config.model: only the thinking level varies.
 function baseRoute(tier, config, virtualLevel) {
-  if (tier === "direct") return { model: config.fast, thinkingLevel: "off" };
+  const model = config.model;
+  if (tier === "direct") return { model, thinkingLevel: "off" };
   const tiers = (config && config.tiers) || { routine: "off", standard: "low", deep: "medium" };
   const level = tiers[tier] || tiers.standard || "low";
-  const model = tier === "routine" ? config.fast : config.strong;
   if (tier === "deep" && virtualLevel === "high" && level === "medium") {
     return { model, thinkingLevel: "high" };
   }
@@ -381,27 +386,23 @@ export function decideRoute(request = {}) {
     return {
       model: direct.model,
       thinkingLevel: direct.thinkingLevel,
-      state: { ...emptyState(), phase: "direct", tier: "direct", lastModel: direct.model, lastThinking: direct.thinkingLevel, lastReason: "direct request (compaction or extension): fast, thinking off" },
+      state: { ...emptyState(), phase: "direct", tier: "direct", lastModel: direct.model, lastThinking: direct.thinkingLevel, lastReason: "direct request (compaction or extension): same model, thinking off" },
     };
   }
 
   if (reason === "retry") {
-    const error = failed && failed.message && failed.message.errorMessage;
+    // A retry never changes the model, not even on a provider overload: pi backs off and retries the same route.
     let model;
     let thinkingLevel;
     let lastReason;
-    if (failed && failed.model && isOverloadError(error)) {
-      model = failed.model === config.strong ? config.fast : config.strong;
-      thinkingLevel = "medium";
-      lastReason = "retry: provider overload, failed over to alternate model";
-    } else if (failed && failed.model) {
+    if (failed && failed.model) {
       model = failed.model;
       thinkingLevel = failed.thinkingLevel || "medium";
-      lastReason = "retry: sticky on the failed model";
+      lastReason = "retry: same model as the failed request";
     } else {
-      model = (previous && previous.model) || config.fast;
+      model = (previous && previous.model) || config.model;
       thinkingLevel = (previous && previous.thinkingLevel) || "medium";
-      lastReason = "retry: no failed model, stick to the previous route";
+      lastReason = "retry: no failed request, stick to the previous route";
     }
     const state = {
       ...stateIn,
@@ -416,7 +417,7 @@ export function decideRoute(request = {}) {
   }
 
   if (reason === "continuation") {
-    const sticky = (previous && previous.model) || stateIn.lastModel || config.strong;
+    const sticky = (previous && previous.model) || stateIn.lastModel || config.model;
     let thinkingLevel = (previous && previous.thinkingLevel) || stateIn.lastThinking || "medium";
     const clean = countConsecutiveCleanTools(messages);
     const failure = hasFailureInLastTool(messages);
@@ -424,14 +425,15 @@ export function decideRoute(request = {}) {
 
     if (failure) {
       const tiers = (config && config.tiers) || { standard: "low", deep: "medium" };
-      const minimum = sticky === config.strong ? tiers.deep : tiers.standard;
+      // A turn that started routine only needs the standard level to look at a failure; any other turn needs deep.
+      const minimum = stateIn.tier === "routine" ? tiers.standard : tiers.deep;
       thinkingLevel = atLeast(thinkingLevel, minimum);
       lastReason = `tool result needs attention: keep thinking at least ${minimum}`;
     } else if (clean >= 2) {
       thinkingLevel = stepThinkingDown(thinkingLevel);
       lastReason = `${clean} clean tool results: step thinking down to ${thinkingLevel}, same model`;
     } else {
-      lastReason = "continuation: sticky model to preserve the prompt cache";
+      lastReason = "continuation: same model, thinking level unchanged";
     }
 
     // Budget/context pressure applies to continuation too, but never undoes a failure bump.
@@ -480,30 +482,17 @@ export function decideRoute(request = {}) {
   }
 
   const base = baseRoute(tier, config, virtualLevel);
-  let model = base.model;
+  const model = base.model;
   let thinkingLevel = base.thinkingLevel;
   let lastReason = reasonText;
 
   const sessionCost = num(usage.cost);
   const contextPct = num(usage.contextPct);
-  const contextTokens = usage.contextTokens != null ? num(usage.contextTokens) : 0;
-  const prevStrong = !!(previous && previous.model === config.strong);
 
+  // Spend and context pull the thinking level down; they never change the model.
   if (sessionCost >= config.hardBudget) {
-    if (tier === "deep") {
-      model = config.strong;
-      thinkingLevel = "low";
-      lastReason += `; hard budget: strong reserved for deep turns, thinking low`;
-    } else if (tier === "standard" && prevStrong && contextTokens > 40000) {
-      // Cache hysteresis: a strong prompt cache is worth more than the one-turn saving.
-      model = config.strong;
-      thinkingLevel = "low";
-      lastReason += `; hard budget: cache hysteresis keeps strong while context is large`;
-    } else {
-      model = config.fast;
-      thinkingLevel = tier === "standard" ? "low" : "off";
-      lastReason += `; hard budget: routine/standard on the fast model (${thinkingLevel})`;
-    }
+    thinkingLevel = tier === "routine" ? "off" : atMost(thinkingLevel, "low");
+    lastReason += `; hard budget: thinking capped at ${thinkingLevel}`;
   } else if (sessionCost >= config.softBudget || contextPct >= config.ctxPressure) {
     const pressureByContext = contextPct >= config.ctxPressure;
     const why = pressureByContext ? "context pressure" : "soft budget";
@@ -529,11 +518,6 @@ export function decideRoute(request = {}) {
     classifierUsed: !!classifierUsed,
   };
   return { model, thinkingLevel, state };
-}
-
-/** Provider errors that are worth failing over for. */
-export function isOverloadError(message) {
-  return /429|503|529|overload|rate.?limit|capacity|temporarily unavailable/i.test(String(message || ""));
 }
 
 function modelRef(model) {
@@ -687,17 +671,10 @@ export default function (pi) {
         // Clamp to what this profile's physical models actually offer (the flash profile has no medium tier).
         const thinkingLevel = clampLevel(decision.thinkingLevel, config.levels);
 
-        // Resolve the chosen model; fall back to the other model in the pair when the provider is absent rather
-        // than failing the turn. Only when neither resolves does routing error out.
-        let model = resolveModel(ctx, decision.model);
-        let fallback = null;
+        // Resolve the chosen model. There is no alternate to fall back to: a missing model is a setup error.
+        const model = resolveModel(ctx, decision.model);
         if (!model) {
-          const alternate = decision.model === config.strong ? config.fast : config.strong;
-          fallback = { from: decision.model, to: alternate };
-          model = resolveModel(ctx, alternate);
-          if (!model) {
-            throw new Error(`orchestra/${id}: neither ${decision.model} nor ${alternate} is in the catalog`);
-          }
+          throw new Error(`orchestra/${id}: ${decision.model} is not in the catalog (provider not loaded or no credentials)`);
         }
 
         lastSnapshot = {
@@ -709,7 +686,6 @@ export default function (pi) {
           usage,
           classifier: decision.state && decision.state.classifierUsed ? classifierLabel || "classifier" : null,
           config,
-          fallback,
         };
 
         const result = { model, thinkingLevel };
@@ -729,12 +705,11 @@ export default function (pi) {
       const s = lastSnapshot;
       const money = (n) => `$${num(n).toFixed(2)}`;
       const pct = (n) => `${Math.round(num(n) * 100)}%`;
-      const fallbackText = s.fallback ? ` · fallback ${s.fallback.from} → ${s.fallback.to}` : "";
       const text =
         `router: [${s.profile || "?"}] ${s.model}:${s.thinkingLevel} (${s.tier || "?"}) · ${s.reason || "no reason recorded"} · ` +
         `spend ${money(s.usage.cost)} vs soft ${money(s.config.softBudget)} / hard ${money(s.config.hardBudget)} · ` +
         `context ${pct(s.usage.contextPct)} · cache hit ${Math.round(num(s.usage.cacheHitPct))}% · ` +
-        `classifier ${s.classifier || "deterministic fallback"}` + fallbackText;
+        `classifier ${s.classifier || "deterministic fallback"}`;
       if (ctx && ctx.ui) ctx.ui.notify(text, "info");
     },
   });
