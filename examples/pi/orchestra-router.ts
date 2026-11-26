@@ -13,6 +13,10 @@
 // directly for tests.
 // @ts-nocheck
 
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
 const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
 const FLASH_MODEL = "deepseek/deepseek-flash";
 const DEFAULT_SOFT_BUDGET = 1.5;
@@ -52,19 +56,21 @@ const NONZERO_EXIT = /\bexit(?:\s+code)?\s*[:=]?\s*[1-9]\d*\b/i;
 /**
  * Read the router's optional configuration for one profile. All values have safe defaults. The ds profile reads
  * ORCHESTRA_ROUTER_MODEL; the others read ORCHESTRA_ROUTER_<PROFILE>_MODEL. The old _STRONG pin still works as an
- * alias; the old _FAST pin is ignored (there is no second model any more).
+ * alias; the old _FAST pin is ignored (there is no second model any more). A per-model profile passes its own `defs`
+ * (model, tiers, levels): its model is fixed by its id, so no env pin applies to it.
  */
-export function readRouterConfig(env = process.env, profile = "ds") {
+export function readRouterConfig(env = process.env, profile = "ds", defs = null) {
   const number = (name, fallback) => {
     const raw = env[name];
     const n = raw == null || raw === "" ? NaN : Number(raw);
     return Number.isFinite(n) && n >= 0 ? n : fallback;
   };
-  const defs = PROFILE_DEFAULTS[profile] || PROFILE_DEFAULTS.ds;
+  const fixed = defs && defs.model ? defs : null;
+  if (!fixed) defs = PROFILE_DEFAULTS[profile] || PROFILE_DEFAULTS.ds;
   const prefix = profile === "ds" ? "ORCHESTRA_ROUTER" : `ORCHESTRA_ROUTER_${profile.toUpperCase()}`;
   return {
     profile,
-    model: env[`${prefix}_MODEL`] || env[`${prefix}_STRONG`] || defs.model,
+    model: fixed ? fixed.model : env[`${prefix}_MODEL`] || env[`${prefix}_STRONG`] || defs.model,
     classifier: env.ORCHESTRA_ROUTER_CLASSIFIER || "",
     softBudget: number("ORCHESTRA_ROUTER_SOFT_BUDGET", DEFAULT_SOFT_BUDGET),
     hardBudget: number("ORCHESTRA_ROUTER_HARD_BUDGET", DEFAULT_HARD_BUDGET),
@@ -587,113 +593,289 @@ function stateChanged(previous, next) {
   return Object.keys(b).some((key) => a[key] !== b[key]);
 }
 
+// ---- One router per physical model ------------------------------------------------------------------------------
+// Besides the named profiles, every reasoning chat model in the catalog gets its own router,
+// orchestra/<provider>-<model>-auto, with the same frugal tiers mapped onto that model's own thinking levels. Pi has
+// no catalog while extensions load, so the list is built at session_start from ctx.modelRegistry.getAvailable() and
+// cached; the next start registers the cached list at load time, so `--model orchestra/<x>-auto` and resumed sessions
+// find their model before session_start runs. ORCHESTRA_ROUTER_PER_MODEL=0 turns this off.
+
+/** Router levels a catalog model offers, by Pi's rules: null in thinkingLevelMap is unsupported, xhigh only when mapped. */
+export function supportedLevels(model) {
+  if (!model || !model.reasoning) return ["off"];
+  const map = model.thinkingLevelMap || {};
+  return LEVELS.filter((level) => {
+    const mapped = map[level];
+    if (mapped === null) return false;
+    if (level === "xhigh") return mapped !== undefined;
+    return true;
+  });
+}
+
+/** Frugal tiers on a model's own ladder: routine off, standard low, deep medium (high when it has no medium). */
+export function tiersForLevels(levels) {
+  const list = Array.isArray(levels) && levels.length ? levels : LEVELS;
+  const pick = (...wanted) => wanted.find((l) => list.includes(l));
+  return {
+    routine: pick("off", "low") || list[0],
+    standard: pick("low") || clampLevel("low", list),
+    deep: pick("medium", "high") || list[list.length - 1],
+  };
+}
+
+function slug(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9.]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+}
+
+/** Virtual id for a catalog model: <provider>-<last id segment>-auto (the whole id when `full`). */
+export function perModelId(model, full = false) {
+  const id = String((model && model.id) || "");
+  return `${slug(model && model.provider)}-${slug(full ? id : id.slice(id.lastIndexOf("/") + 1))}-auto`;
+}
+
+/**
+ * Catalog models -> per-model router entries: JSON-safe, sorted by id, ids unique. Skips virtual models, non-chat
+ * models, models without reasoning (there is no thinking level to route) and the orchestra provider itself. Two models
+ * whose short ids collide both fall back to their full id.
+ */
+export function perModelEntries(models) {
+  const list = (Array.isArray(models) ? models : []).filter(
+    (m) =>
+      m && m.id && m.provider && m.provider !== "orchestra" && m.api !== "pi-virtual" &&
+      (m.type == null || m.type === "chat") && m.reasoning === true,
+  );
+  const counts = new Map();
+  for (const m of list) counts.set(perModelId(m), (counts.get(perModelId(m)) || 0) + 1);
+  const out = new Map();
+  for (const m of list) {
+    const id = counts.get(perModelId(m)) > 1 ? perModelId(m, true) : perModelId(m);
+    if (Object.prototype.hasOwnProperty.call(PROFILE_BY_ID, id) || out.has(id)) continue;
+    const levels = supportedLevels(m);
+    const entry = { id, model: `${m.provider}/${m.id}`, name: `Orchestra Auto (${m.provider}/${m.id})`, levels, tiers: tiersForLevels(levels) };
+    if (num(m.contextWindow) > 0) entry.contextWindow = num(m.contextWindow);
+    if (num(m.maxTokens) > 0) entry.maxTokens = num(m.maxTokens);
+    out.set(id, entry);
+  }
+  return [...out.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * The entries to cache after a session_start: this session's entries for every provider that has available models
+ * here, plus cached entries of providers this session cannot see (a worker started with --no-extensions, or without
+ * that provider's key, must not erase the interactive catalog).
+ */
+export function mergePerModelEntries(cached, fresh) {
+  const providerOf = (e) => String(e.model).slice(0, String(e.model).indexOf("/"));
+  const seen = new Set(fresh.map(providerOf));
+  const ids = new Set(fresh.map((e) => e.id));
+  const kept = (Array.isArray(cached) ? cached : []).filter((e) => !seen.has(providerOf(e)) && !ids.has(e.id));
+  return [...fresh, ...kept].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+export function perModelCachePath(env = process.env) {
+  if (env.ORCHESTRA_ROUTER_CACHE) return env.ORCHESTRA_ROUTER_CACHE;
+  return join(env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache"), "orchestra", "router-models.json");
+}
+
+function validEntry(e) {
+  return (
+    !!e && typeof e.id === "string" && /^[a-z0-9.-]+-auto$/.test(e.id) &&
+    !Object.prototype.hasOwnProperty.call(PROFILE_BY_ID, e.id) &&
+    typeof e.model === "string" && e.model.indexOf("/") > 0 &&
+    Array.isArray(e.levels) && e.levels.every((l) => LEVELS.includes(l)) &&
+    !!e.tiers && TIERS.every((t) => LEVELS.includes(e.tiers[t]))
+  );
+}
+
+/** Cached entries (only well-formed ones); [] when the cache is missing or unreadable. */
+export function readPerModelCache(path) {
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    return data && data.version === 1 && Array.isArray(data.entries) ? data.entries.filter(validEntry) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePerModelCache(path, entries) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ version: 1, entries }, null, 1) + "\n");
+    renameSync(tmp, path);
+  } catch {
+    /* best effort: a read-only home (a sandboxed worker) just keeps the old cache */
+  }
+}
+
+function perModelEnabled(env = process.env) {
+  return !/^(0|off|false|no)$/i.test(String(env.ORCHESTRA_ROUTER_PER_MODEL || "").trim());
+}
+
+function registerPerModelRouters(pi) {
+  if (!perModelEnabled()) return;
+  const path = perModelCachePath();
+  const registered = new Map(); // id -> JSON of the entry it was registered with
+  const register = (e) => {
+    const config = readRouterConfig(process.env, e.id, { model: e.model, tiers: e.tiers, levels: e.levels });
+    registerRouter(pi, { id: e.id, name: e.name || `Orchestra Auto (${e.model})`, config, contextWindow: e.contextWindow, maxTokens: e.maxTokens });
+    registered.set(e.id, JSON.stringify(e));
+  };
+  for (const e of readPerModelCache(path)) {
+    try {
+      register(e);
+    } catch {
+      /* one bad entry never blocks the others */
+    }
+  }
+
+  if (typeof pi.on !== "function") return;
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      const registry = ctx && ctx.modelRegistry;
+      if (!registry || typeof registry.getAvailable !== "function") return;
+      const fresh = perModelEntries(registry.getAvailable());
+      const wanted = new Set(fresh.map((e) => e.id));
+      for (const e of fresh) if (registered.get(e.id) !== JSON.stringify(e)) register(e);
+      // Unusable here (model gone, or its provider not loaded in this session): unregister, but the cache keeps
+      // the entries of providers this session cannot see.
+      for (const id of [...registered.keys()]) {
+        if (wanted.has(id)) continue;
+        try {
+          pi.unregisterVirtualModel("orchestra", id);
+        } catch {
+          /* already gone */
+        }
+        registered.delete(id);
+      }
+      const cached = readPerModelCache(path);
+      const next = mergePerModelEntries(cached, fresh);
+      if (JSON.stringify(cached) !== JSON.stringify(next)) writePerModelCache(path, next);
+    } catch {
+      /* never break a session over the per-model list */
+    }
+  });
+}
+
 let lastSnapshot = null;
 
-export default function (pi) {
-  for (const [id, profileKey] of Object.entries(PROFILE_BY_ID)) {
-    const config = readRouterConfig(process.env, profileKey);
+/** Register one router virtual model: `orchestra/<id>` on config.model, varying only the thinking level. */
+function registerRouter(pi, { id, name, config, contextWindow, maxTokens }) {
+  const limits = {};
+  if (num(contextWindow) > 0) limits.contextWindow = num(contextWindow);
+  if (num(maxTokens) > 0) limits.maxTokens = num(maxTokens);
+  pi.registerVirtualModel({
+    provider: "orchestra",
+    id,
+    name,
+    thinkingLevels: ["low", "medium", "high"],
+    ...limits,
+    async route(request, ctx) {
+      const messages = Array.isArray(request.messages) ? request.messages : [];
+      const contextUsage = safeContextUsage(ctx);
+      const usage = summarizeUsage(messages, contextUsage);
+      const reason = request.reason || "user";
+      const virtualLevel = request.thinkingLevel || "medium";
 
-    pi.registerVirtualModel({
-      provider: "orchestra",
-      id,
-      name: id === "auto" ? "Orchestra Auto" : `Orchestra Auto (${profileKey})`,
-      thinkingLevels: ["low", "medium", "high"],
-      async route(request, ctx) {
-        const messages = Array.isArray(request.messages) ? request.messages : [];
-        const contextUsage = safeContextUsage(ctx);
-        const usage = summarizeUsage(messages, contextUsage);
-        const reason = request.reason || "user";
-        const virtualLevel = request.thinkingLevel || "medium";
-
-        let tier;
-        let classifierUsed = null;
-        let tierReason = "";
-        let classifierLabel = null;
-        if (reason === "user") {
-          const classifier = await findClassifier(ctx, config);
-          let classify;
-          if (classifier) {
-            classifierLabel = classifier.ref;
-            classify = async ({ prompt, lastTool }) => {
-              const result = await ctx.modelRegistry.classify(
-                classifier.model,
-                {
-                  state: { prompt, lastTool },
-                  questions: {
-                    tier: {
-                      type: "choice",
-                      instructions:
-                        "Pick the routing tier for this software-engineering turn. Routine is mechanical; " +
-                        "standard needs ordinary judgment; deep needs architecture, security, data, network, " +
-                        "migration, incident, or review-blocker judgment.",
-                      criteria: {
-                        routine: "Status, listing, formatting, linting, cleanup, or a trivial confirmation",
-                        standard: "An ordinary implementation, small fix, or straightforward review",
-                        deep: "Architecture, design, security, auth, schema, migration, database, network, infra, rollback, incident, hard debugging, or a blocking review",
-                      },
+      let tier;
+      let classifierUsed = null;
+      let tierReason = "";
+      let classifierLabel = null;
+      if (reason === "user") {
+        const classifier = await findClassifier(ctx, config);
+        let classify;
+        if (classifier) {
+          classifierLabel = classifier.ref;
+          classify = async ({ prompt, lastTool }) => {
+            const result = await ctx.modelRegistry.classify(
+              classifier.model,
+              {
+                state: { prompt, lastTool },
+                questions: {
+                  tier: {
+                    type: "choice",
+                    instructions:
+                      "Pick the routing tier for this software-engineering turn. Routine is mechanical; " +
+                      "standard needs ordinary judgment; deep needs architecture, security, data, network, " +
+                      "migration, incident, or review-blocker judgment.",
+                    criteria: {
+                      routine: "Status, listing, formatting, linting, cleanup, or a trivial confirmation",
+                      standard: "An ordinary implementation, small fix, or straightforward review",
+                      deep: "Architecture, design, security, auth, schema, migration, database, network, infra, rollback, incident, hard debugging, or a blocking review",
                     },
                   },
                 },
-                request.signal ? { signal: request.signal } : undefined,
-              );
-              const answer = result && result.stopReason === "stop" ? result.answers && result.answers.tier : null;
-              return answer && answer.type === "choice" ? answer.choice : undefined;
-            };
-          }
-          const choice = await chooseTier({
-            userText: lastUserText(messages),
-            lastToolText: lastToolText(messages),
-            lastToolSummary: toolSummary(messages),
-            virtualLevel,
-            classify,
-            classifierRef: classifierLabel,
-          });
-          tier = choice.tier;
-          classifierUsed = choice.classifierUsed;
-          tierReason = choice.classifierUsed ? "classifier-chosen tier" : choice.reason;
+              },
+              request.signal ? { signal: request.signal } : undefined,
+            );
+            const answer = result && result.stopReason === "stop" ? result.answers && result.answers.tier : null;
+            return answer && answer.type === "choice" ? answer.choice : undefined;
+          };
         }
-
-        const decision = decideRoute({
-          reason,
-          messages,
-          previous: request.previous,
-          failed: request.failed,
-          thinkingLevel: virtualLevel,
+        const choice = await chooseTier({
+          userText: lastUserText(messages),
+          lastToolText: lastToolText(messages),
+          lastToolSummary: toolSummary(messages),
           virtualLevel,
-          tier,
-          tierReason,
-          classifierUsed,
-          usage,
-          state: request.state,
-          config,
+          classify,
+          classifierRef: classifierLabel,
         });
+        tier = choice.tier;
+        classifierUsed = choice.classifierUsed;
+        tierReason = choice.classifierUsed ? "classifier-chosen tier" : choice.reason;
+      }
 
-        // Clamp to what this profile's physical models actually offer (the flash profile has no medium tier).
-        const thinkingLevel = clampLevel(decision.thinkingLevel, config.levels);
+      const decision = decideRoute({
+        reason,
+        messages,
+        previous: request.previous,
+        failed: request.failed,
+        thinkingLevel: virtualLevel,
+        virtualLevel,
+        tier,
+        tierReason,
+        classifierUsed,
+        usage,
+        state: request.state,
+        config,
+      });
 
-        // Resolve the chosen model. There is no alternate to fall back to: a missing model is a setup error.
-        const model = resolveModel(ctx, decision.model);
-        if (!model) {
-          throw new Error(`orchestra/${id}: ${decision.model} is not in the catalog (provider not loaded or no credentials)`);
-        }
+      // Clamp to what this profile's physical models actually offer (the flash profile has no medium tier).
+      const thinkingLevel = clampLevel(decision.thinkingLevel, config.levels);
 
-        lastSnapshot = {
-          profile: config.profile,
-          model: decision.model,
-          thinkingLevel,
-          reason: decision.state && decision.state.lastReason,
-          tier: decision.state && decision.state.tier,
-          usage,
-          classifier: decision.state && decision.state.classifierUsed ? classifierLabel || "classifier" : null,
-          config,
-        };
+      // Resolve the chosen model. There is no alternate to fall back to: a missing model is a setup error.
+      const model = resolveModel(ctx, decision.model);
+      if (!model) {
+        throw new Error(`orchestra/${id}: ${decision.model} is not in the catalog (provider not loaded or no credentials)`);
+      }
 
-        const result = { model, thinkingLevel };
-        if (reason !== "direct" && decision.state && stateChanged(request.state, decision.state)) result.state = decision.state;
-        return result;
-      },
-    });
+      lastSnapshot = {
+        profile: config.profile,
+        model: decision.model,
+        thinkingLevel,
+        reason: decision.state && decision.state.lastReason,
+        tier: decision.state && decision.state.tier,
+        usage,
+        classifier: decision.state && decision.state.classifierUsed ? classifierLabel || "classifier" : null,
+        config,
+      };
+
+      const result = { model, thinkingLevel };
+      if (reason !== "direct" && decision.state && stateChanged(request.state, decision.state)) result.state = decision.state;
+      return result;
+    },
+  });
+}
+
+export default function (pi) {
+  for (const [id, profileKey] of Object.entries(PROFILE_BY_ID)) {
+    const name = id === "auto" ? "Orchestra Auto" : `Orchestra Auto (${profileKey})`;
+    registerRouter(pi, { id, name, config: readRouterConfig(process.env, profileKey) });
   }
+  registerPerModelRouters(pi);
 
   pi.registerCommand("router", {
     description: "Show the last orchestra/auto route, spend, context, cache and classifier",

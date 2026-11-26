@@ -1,6 +1,11 @@
 # Changelog
 
 ## 0.8.0 (unreleased)
+- **One router per physical model.** Every reasoning chat model in the catalog gets `orchestra/<provider>-<model>-auto`,
+which is pinned to that model and uses the frugal tiers on its own thinking levels. The list is built at `session_start`
+and cached (`ORCHESTRA_ROUTER_CACHE`, default `$XDG_CACHE_HOME/orchestra/router-models.json`), so `--model`,
+`--list-models` and resumed sessions find it at load. A session that cannot see a provider never erases that provider
+from the cache. Turn it off with `ORCHESTRA_ROUTER_PER_MODEL=0` ([docs/router.md](docs/router.md)).
 - **Jev, an advisory second opinion** (`ORCHESTRA_JEV=off|shadow|advise`, off by default; [docs/jev.md](docs/jev.md)).
 `orchestra-worker decide split|ready|triage` asks a classifier model (Jev on Cloudflare Workers AI, or any endpoint
 speaking the same body) three typed questions from `config/decisions.json`: worker, split or orchestrator for a spec;
