@@ -415,7 +415,7 @@ export function decideRoute(request = {}) {
     const sticky = (previous && previous.model) || stateIn.lastModel || config.strong;
     let thinkingLevel = (previous && previous.thinkingLevel) || stateIn.lastThinking || "medium";
     const clean = countConsecutiveCleanTools(messages);
-    const failure = hasFailureSinceLastUser(messages);
+    const failure = hasFailureInLastTool(messages);
     let lastReason;
 
     if (failure) {
