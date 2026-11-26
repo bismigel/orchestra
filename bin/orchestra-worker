@@ -80,6 +80,7 @@ load_config() {
   ORCHESTRA_PROFILE=${ORCHESTRA_PROFILE:-dev}   # dev | ops (prompts/worker-<profile>.md, lint rules)
   ORCHESTRA_MODEL=${ORCHESTRA_MODEL:-}
   ORCHESTRA_ALLOWED_MODELS=${ORCHESTRA_ALLOWED_MODELS:-$ORCHESTRA_MODEL}
+  ORCHESTRA_ROUTER_EXT=${ORCHESTRA_ROUTER_EXT:-}            # virtual-model router extension (orchestra/auto)
   ORCHESTRA_THINKING=${ORCHESTRA_THINKING:-low}
   ORCHESTRA_TIMEOUT=${ORCHESTRA_TIMEOUT:-45m}
   ORCHESTRA_KEY_ENV=${ORCHESTRA_KEY_ENV:-}
@@ -134,7 +135,12 @@ cmd_run() {
   [ -f "$harness_file" ] || die "unknown harness '$ORCHESTRA_HARNESS' (lib/harness/*.sh, or a path to a .sh file)"
   # shellcheck disable=SC1090
   . "$harness_file"
-  model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
+  if [ -n "$ORCHESTRA_ROUTER_EXT" ]; then
+    [ -f "$ORCHESTRA_ROUTER_EXT" ] || die "ORCHESTRA_ROUTER_EXT not found: $ORCHESTRA_ROUTER_EXT"
+    ORCHESTRA_ROUTER_EXT=$(realpath "$ORCHESTRA_ROUTER_EXT")
+  else
+    model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
+  fi
 
   # Worktree: one per task, next to the repository unless given.
   local common; common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
@@ -587,9 +593,11 @@ build_sandbox() {
   else
     _sb+=(--bind "$state/home" "$home" --bind "$wt" "$wt" --ro-bind "$common" "$common" --bind "$gitdir" "$gitdir")
   fi
-  local pair src dst
-  for pair in $ORCHESTRA_RO_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
-    [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--ro-bind "$src" "$dst"); done
+  local pair src dst ro_binds="$ORCHESTRA_RO_BINDS"
+  # The router extension is a file, not a bind directory; mount it at the same absolute path the pi argv names.
+  [ -n "${ORCHESTRA_ROUTER_EXT:-}" ] && ro_binds="$ro_binds $ORCHESTRA_ROUTER_EXT:$ORCHESTRA_ROUTER_EXT"
+  for pair in $ro_binds; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
+    [ -e "$src" ] || [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--ro-bind "$src" "$dst"); done
   for pair in $ORCHESTRA_RW_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
     [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--bind "$src" "$dst"); done
   if [ -n "${EGRESS_SOCK:-}" ]; then
@@ -821,8 +829,14 @@ cmd_doctor() {
   done
   # Model
   if [ -z "$ORCHESTRA_MODEL" ]; then fail_ "ORCHESTRA_MODEL is not set"
+  elif [ -n "$ORCHESTRA_ROUTER_EXT" ]; then ok_ "model $ORCHESTRA_MODEL (virtual model; physical models checked post-run against ORCHESTRA_ALLOWED_MODELS)"
   elif model_allowed "$ORCHESTRA_MODEL"; then ok_ "model $ORCHESTRA_MODEL (allowed: $ORCHESTRA_ALLOWED_MODELS)"
   else fail_ "model $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS ($ORCHESTRA_ALLOWED_MODELS)"; fi
+  if [ -n "$ORCHESTRA_ROUTER_EXT" ]; then
+    if [ -f "$ORCHESTRA_ROUTER_EXT" ]; then
+      ok_ "router extension: $ORCHESTRA_ROUTER_EXT (physical models checked post-run against ORCHESTRA_ALLOWED_MODELS)"
+    else fail_ "router extension: $ORCHESTRA_ROUTER_EXT not found"; fi
+  fi
   # Harness
   local hf="$here/lib/harness/$ORCHESTRA_HARNESS.sh"
   case "$ORCHESTRA_HARNESS" in */*) hf=$(realpath -m "$ORCHESTRA_HARNESS") ;; esac
@@ -990,7 +1004,12 @@ cmd_scout() {
   [ -f "$harness_file" ] || die "unknown harness '$ORCHESTRA_HARNESS' (lib/harness/*.sh, or a path to a .sh file)"
   # shellcheck disable=SC1090
   . "$harness_file"
-  model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
+  if [ -n "$ORCHESTRA_ROUTER_EXT" ]; then
+    [ -f "$ORCHESTRA_ROUTER_EXT" ] || die "ORCHESTRA_ROUTER_EXT not found: $ORCHESTRA_ROUTER_EXT"
+    ORCHESTRA_ROUTER_EXT=$(realpath "$ORCHESTRA_ROUTER_EXT")
+  else
+    model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
+  fi
 
   local state; state="$(dirname "$repo")/$(basename "$repo")-worktrees/.scout/$task"
   mkdir -p "$state/sessions" "$state/runs" "$state/home"
