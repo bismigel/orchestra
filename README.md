@@ -146,7 +146,11 @@ Habits that pay off:
   back right the first time.
 - **Match the orchestrator to the work.** Planning and risky reviews deserve the strongest model you have; routine
   waves of well-specified tasks can be driven by a cheaper orchestrator (pi on a mid-range model, say), because the
-  specs, proofs and review digest carry the rigour.
+  specs, proofs and review digest carry the rigour. In **pi**, [examples/pi/orchestra-router.ts](examples/pi/orchestra-router.ts)
+  registers a virtual model (`orchestra/auto`) that selects both the physical model and thinking level per turn
+  (routine → review → architect → high-risk), keeps tool continuations cache-sticky while stepping down thinking,
+  tracks session spend and context pressure, and uses an optional classifier with a deterministic fallback (`/router`
+  to inspect).
 - **Workers can be free.** A local model through Ollama works as a worker for simple tasks (`ORCHESTRA_MODEL=ollama/…`,
   no key); keep the paid model for the rest.
 
@@ -218,6 +222,18 @@ cover it: `ops-change` (one loop for every change, with checklists for new apps,
 rotation) and `ops-incident`. They are installed only with `./install.sh --ops`. See
 [docs/ops-guide.md](docs/ops-guide.md).
 
+Infrastructure repos also benefit from three optional keys in `.orchestra/config.env` (any profile):
+- `ORCHESTRA_STATE_CMD`: host-side read-only snapshot refreshed into `.orchestra/state.md` by `orchestra-worker scout <id> --state`
+  so the sandboxed scout can flag live drift without holding cluster/cloud credentials.
+- `ORCHESTRA_RENDER_CMD`: renders manifests (`kustomize build`, `helm template`, …) so `orchestra-worker diff <id> --rendered`
+  and `orchestra-worker review <id>` surface the rendered diff alongside `risk_notes`.
+- `ORCHESTRA_PR_CMD`: plug in [examples/forgejo-pr.sh](examples/forgejo-pr.sh) (or `tea`) to land with `--pr` on
+  Forgejo/Gitea, or leave default `gh` for GitHub.
+
+Review artifacts (`orchestra-worker artifact <id>`) are written into a single local folder (`~/.local/share/orchestra/artifacts`
+with an `index.html`) and optionally published to an [Artifact Server](https://artifactserver.com/) when
+`ORCHESTRA_ARTIFACT_SERVER` is configured, falling back to the local HTML view when unreachable.
+
 ## Commands
 | Command | What it does |
 |---|---|
@@ -243,8 +259,9 @@ them, add one line to `~/.claude/CLAUDE.md`:
 ```
 - Delegate mechanical coding work with the orchestra skill: I decide and review; workers only implement settled specs.
 ```
-pi: link [examples/pi/orchestra.ts](examples/pi/orchestra.ts) and [examples/pi/workers.ts](examples/pi/workers.ts)
-into `~/.pi/agent/extensions/`. Other orchestrators: reference `docs/orchestrator-guide.md` from their `AGENTS.md`.
+pi: link [examples/pi/orchestra.ts](examples/pi/orchestra.ts), [examples/pi/workers.ts](examples/pi/workers.ts), and
+optionally [examples/pi/orchestra-router.ts](examples/pi/orchestra-router.ts) (`orchestra/auto` virtual model) into
+`~/.pi/agent/extensions/`. Other orchestrators: reference `docs/orchestrator-guide.md` from their `AGENTS.md`.
 
 ## Status
 Early and evolving: the commands above, the report schema and the config keys are meant to stay stable while the

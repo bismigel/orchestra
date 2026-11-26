@@ -16,11 +16,14 @@ printed by `orchestra-worker guide orchestrator`; the essentials:
    money, contracts, schema and security are never left to a worker's judgment.
 2. **Spec** it: goal, allowed paths, the decisions, acceptance the worker can run (tests, not screenshots),
    out of scope. Write the risky test rows yourself, including negatives (what must not change). For anything
-   beyond a few files, **scout the draft first**: `orchestra-worker scout <id> --spec <draft>` (read-only worker,
-   cents) reports real paths, missed files and tests, broken commands and size, with a block to paste into
-   Touches. Delegating that legwork is cheaper than verifying paths yourself.
+   beyond a few files, **scout the draft first**: `orchestra-worker scout <id> --spec <draft>` (or `--prompt "<text>"`
+   for one-off tasks without a spec file; add `--state` when `ORCHESTRA_STATE_CMD` is configured to refresh
+   `.orchestra/state.md` on the host before launching). The read-only worker reports real paths, missed files and
+   tests, broken commands and size, with a block to paste into Touches. Delegating that legwork is cheaper than
+   verifying paths yourself.
 3. **Launch** as a background command so you are notified on exit:
-   `orchestra-worker run <id> --spec <file>`; feedback rounds: `orchestra-worker run <id> --feedback <file>`.
+   `orchestra-worker run <id> --spec <file>` (or `--prompt "<text>"` for a short inline task); feedback rounds:
+   `orchestra-worker run <id> --feedback <file>`.
    Keep 2-3 workers at most. Model, key and sandbox come from orchestra's config; never pass keys on the command line.
    Exit 2 before a run means it refused: the task is already running, or its spec changed on the base since the
    worktree was made (rebase it, or `--allow-stale` if the old spec is intended). Exit 5 means it passed
@@ -28,9 +31,11 @@ printed by `orchestra-worker guide orchestrator`; the essentials:
    The run's output has one progress line per tool call, for the user. When it ends, read only the card:
    `sed -n '/^── /,$p' <output file>` (or go straight to `review`), not the whole log.
 4. **Review** every run, starting with `orchestra-worker review <id>`: exit meaning, **blocking** questions (decide
-   them), **assumed** calls (skim), files outside the spec's paths, claimed checks, proofs for the exact code, diff
-   stat. Then the full diff (`orchestra-worker diff <id>`), your own run of the checks (`orchestra-worker prove <id>`;
-   a report is a claim, a proof is evidence), and **probes** with your own inputs on anything risky.
+   them), **assumed** calls (skim), `risk_notes` (answer every one), files outside the spec's paths, claimed checks,
+   proofs for the exact code, diff stat. Then the full diff (`orchestra-worker diff <id>`, plus `--rendered` when
+   `ORCHESTRA_RENDER_CMD` is set), your own run of the checks (`orchestra-worker prove <id>`; a report is a claim, a
+   proof is evidence), and **probes** with your own inputs on anything risky. For a shareable HTML bundle of report,
+   diff and proofs, run `orchestra-worker artifact <id>` (`--local` to skip remote publish, `--open` to view).
    After a passing prove, `review` shows a `candidate:` line (the run, base and tree the proofs bound to). If you
    edit or rebase the worktree afterwards it shows `candidate drift:` with the stat: prove again before you land.
    While runs are going, `orchestra-worker status` shows each one's current action; point the user at
@@ -39,8 +44,10 @@ printed by `orchestra-worker guide orchestrator`; the essentials:
    yourself. Small fixes you have already decided: just make them.
 6. **Land** with the `orchestra-land` skill, or directly: `orchestra-worker land <id>` (rebase, squash, prove the
    exact code, push with `Proof:` trailers; it refuses on any failing check, and reports `candidate drift:` if the
-   worktree moved since the last proof). A local-branch `ORCHESTRA_BASE` is moved in place instead of pushed. Protected base branch: `orchestra-worker land <id> --pr` pushes a branch and opens
-   a pull request instead. Tell the user what landed, the rounds and the cost (`orchestra-worker summary <id>`).
+   worktree moved since the last proof). A local-branch `ORCHESTRA_BASE` is moved in place instead of pushed.
+   Protected base branch: `orchestra-worker land <id> --pr` pushes a branch and opens a pull request instead (uses
+   `ORCHESTRA_PR_CMD`, e.g. `gh` on GitHub or `examples/forgejo-pr.sh` on Forgejo/Gitea). Tell the user what landed,
+   the rounds and the cost (`orchestra-worker summary <id>`).
    Then **record what the spec missed**: `orchestra-worker lessons <id>` drafts lines from the run's blocking
    questions, outside-path files and assumptions; keep the ones that would change a future spec, write the rule,
    append them to the lessons file (refine reads it). `review` shows `lessons N spec gap(s)` when there are any.
