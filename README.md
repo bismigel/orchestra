@@ -244,7 +244,10 @@ them, add one line to `~/.claude/CLAUDE.md`:
 - Delegate mechanical coding work with the orchestra skill: I decide and review; workers only implement settled specs.
 ```
 pi: link [examples/pi/orchestra.ts](examples/pi/orchestra.ts) and [examples/pi/workers.ts](examples/pi/workers.ts)
-into `~/.pi/agent/extensions/`. Other orchestrators: reference `docs/orchestrator-guide.md` from their `AGENTS.md`.
+into `~/.pi/agent/extensions/`. The optional virtual model router ([examples/pi/orchestra-router.ts](examples/pi/orchestra-router.ts))
+routes each turn by cost and difficulty — `orchestra/ds-auto`, `gemini-auto`, `claude-auto`, and `flash-auto` for workers;
+see [docs/router.md](docs/router.md) for the profiles, the frugal thinking levels and the benchmark behind them.
+Other orchestrators: reference `docs/orchestrator-guide.md` from their `AGENTS.md`.
 
 ## Status
 Early and evolving: the commands above, the report schema and the config keys are meant to stay stable while the

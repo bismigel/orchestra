@@ -919,8 +919,9 @@ cmd_guide() {
     proofs) f=proofs.md ;;
     design) f=design.md ;;
     harness) f=adding-a-harness.md ;;
+    router) f=router.md ;;
     templates) echo "$here/templates"; return 0 ;;
-    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, templates)" ;;
+    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, router, templates)" ;;
   esac
   if [ "$print" = 1 ]; then cat "$here/docs/$f"; else echo "$here/docs/$f"; fi
 }
