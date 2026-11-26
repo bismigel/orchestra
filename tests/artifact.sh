@@ -6,7 +6,7 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
 ARTIFACT="$ROOT/lib/artifact.py"
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d); trap 'fake_stop; fake_stop_pid "${SECOND_PID:-}"; rm -rf "$TMP"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
@@ -209,6 +209,223 @@ if grep -qF "dummy-token-never-print" "$TMP/fb.json" "$TMP/fb.err"; then
 else
   ok "the dummy token is never printed"
 fi
+
+# 6. The remote Artifact Server upload-plan flow, against a fake stdlib server on 127.0.0.1 (still offline).
+REMOTE_TOKEN="dummy-token-never-print"
+FAKE_SERVER="$ROOT/tests/fixtures/fake-artifact-server.py"
+
+fake_start() {  # fake_start MODE LOG [ENV=value ...]: sets FAKE_PID, FAKE_PORT, FAKE_OUT, FAKE_ERR
+  local mode=$1 log=$2; shift 2
+  FAKE_OUT=$(mktemp)
+  FAKE_ERR=$(mktemp)
+  env FAKE_MODE="$mode" FAKE_LOG="$log" "$@" python3 -I "$FAKE_SERVER" > "$FAKE_OUT" 2> "$FAKE_ERR" &
+  FAKE_PID=$!
+  FAKE_PORT=""
+  local i
+  for ((i = 0; i < 250; i++)); do
+    [ -s "$FAKE_OUT" ] && break
+    sleep 0.02
+  done
+  [ -s "$FAKE_OUT" ] && FAKE_PORT=$(head -n 1 "$FAKE_OUT")
+  case "$FAKE_PORT" in
+    ''|*[!0-9]*) bad "fake artifact server ($mode) did not report a port"; head -5 "$FAKE_ERR" | sed 's/^/     /' ;;
+  esac
+}
+
+fake_stop_pid() {
+  [ -n "${1:-}" ] || return 0
+  kill "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+  return 0
+}
+
+fake_stop() {
+  fake_stop_pid "${FAKE_PID:-}"
+  FAKE_PID=""
+}
+
+run_publish() {  # run_publish MODE OUTDIR [ORIGIN, %port% replaced] [ENV=value ...]
+  local mode=$1 out=$2 origin=${3:-}; shift 2
+  [ $# -gt 0 ] && shift
+  LAST_LOG=$(mktemp)
+  : > "$LAST_LOG"
+  fake_start "$mode" "$LAST_LOG" "$@"
+  local target=${origin:-'http://127.0.0.1:%port%'}
+  target=${target//%port%/$FAKE_PORT}
+  LAST_JSON=$(mktemp)
+  LAST_ERR=$(mktemp)
+  env -u ORCHESTRA_ARTIFACT_SERVER_ORIGIN -u ORCHESTRA_ARTIFACT_TOKEN_CMD \
+      ARTIFACT_SERVER_ORIGIN="$target" ARTIFACT_SERVER_AGENT_TOKEN="$REMOTE_TOKEN" \
+      python3 -I "$ARTIFACT" --repo "$REPO" --task A1 --base main --worktree "$WT" \
+        --out-dir "$out" --json > "$LAST_JSON" 2> "$LAST_ERR"
+  LAST_RC=$?
+  fake_stop
+}
+
+token_absent() {  # token_absent NAME OUTDIR: the token is in no output, log, manifest, index or artifact
+  local name=$1 out=$2 where=""
+  [ -n "${LAST_JSON:-}" ] && grep -qF -- "$REMOTE_TOKEN" "$LAST_JSON" 2>/dev/null && where="$where stdout"
+  [ -n "${LAST_ERR:-}" ] && grep -qF -- "$REMOTE_TOKEN" "$LAST_ERR" 2>/dev/null && where="$where stderr"
+  [ -n "${LAST_LOG:-}" ] && grep -qF -- "$REMOTE_TOKEN" "$LAST_LOG" 2>/dev/null && where="$where request-log"
+  grep -rqF -- "$REMOTE_TOKEN" "$out" 2>/dev/null && where="$where saved-files"
+  if [ -n "$where" ]; then bad "$name: the token leaked into$where"
+  else ok "$name: the token is never printed or stored"; fi
+}
+
+assert_local_fallback() {  # assert_local_fallback NAME: --json is a local fallback and the artifact exists
+  local name=$1
+  python3 -I - "$LAST_JSON" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+assert d["mode"] == "local", d
+assert d["url"] is None, d
+assert os.path.isfile(d["path"]), d
+PY
+  [ "$?" = 0 ] && ok "$name: falls back to local and keeps the artifact" || bad "$name: --json is not a local fallback"
+}
+
+# 6a. ok201: create, PUT and commit succeed; the review link comes back and is recorded.
+OUT_OK="$TMP/remote-ok201"
+run_publish ok201 "$OUT_OK"
+[ "$LAST_RC" = 0 ] && ok "remote ok201 exits 0" || { bad "remote ok201 exits $LAST_RC"; sed 's/^/     /' "$LAST_ERR"; }
+python3 -I - "$LAST_JSON" "$LAST_LOG" "$OUT_OK" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+summary_path, log_path, out = sys.argv[1:]
+summary = json.load(open(summary_path))
+assert summary["mode"] == "remote", summary
+url = summary["url"] or ""
+assert url.startswith("http://127.0.0.1:") and url.endswith("/review?x=1"), url
+path = summary["path"]
+assert os.path.dirname(path) == out, (path, out)
+with open(path, "rb") as f:
+    data = f.read()
+entries = [json.loads(line) for line in open(log_path) if line.strip()]
+assert len(entries) == 3, entries
+create, upload, commit = entries
+assert (create["method"], create["path"]) == ("POST", "/api/v1/uploads"), create
+assert (upload["method"], upload["path"]) == ("PUT", "/api/v1/uploads/fake-plan/index.html"), upload
+assert (commit["method"], commit["path"]) == ("POST", "/api/v1/uploads/fake-plan/commit"), commit
+assert [e["idem"] for e in entries] == [False, False, True], entries
+assert all(e["auth_ok"] is True for e in entries), entries
+assert all(e["ua"] == "orchestra-artifact" for e in entries), entries
+assert create["ctype"] == "application/json", create
+assert upload["ctype"] == "text/html; charset=utf-8", upload
+assert commit["ctype"] == "application/json", commit
+body = create["body"]
+assert body["entryPath"] == "index.html" and body["routingMode"] == "static", body
+assert len(body["files"]) == 1, body
+entry = body["files"][0]
+assert entry["path"] == "index.html", entry
+assert entry["mediaType"] == "text/html; charset=utf-8", entry
+assert entry["size"] == len(data), (entry["size"], len(data))
+assert entry["sha256"] == hashlib.sha256(data).hexdigest(), entry
+assert upload["body"] == {"len": len(data)}, upload["body"]
+target = commit["body"]["target"]
+assert target["kind"] == "new_artifact", target
+assert target["accessSetting"] == "account_required", target
+assert target["name"] == "A1 review", target
+assert target["tags"] == ["orchestra"], target
+manifest = json.load(open(os.path.join(out, "manifest.json")))["artifacts"]
+record = [r for r in manifest if r.get("file") == os.path.basename(path)]
+assert len(record) == 1, manifest
+assert record[0]["mode"] == "remote" and record[0]["url"] == url, record[0]
+index = open(os.path.join(out, "index.html"), encoding="utf-8").read()
+assert url in index, "the index does not link the review url"
+PY
+[ "$?" = 0 ] && ok "ok201: plan, upload, commit and the review link are correct" \
+  || bad "ok201: the upload-plan flow is wrong"
+token_absent ok201 "$OUT_OK"
+
+# 6b. ok200: the create and commit endpoints answering 200 work the same way.
+OUT_OK200="$TMP/remote-ok200"
+run_publish ok200 "$OUT_OK200"
+[ "$LAST_RC" = 0 ] && ok "remote ok200 exits 0" || { bad "remote ok200 exits $LAST_RC"; sed 's/^/     /' "$LAST_ERR"; }
+python3 -I - "$LAST_JSON" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["mode"] == "remote", d
+assert (d["url"] or "").endswith("/review?x=1"), d
+PY
+[ "$?" = 0 ] && ok "ok200: a 200 create and commit still publish remotely" || bad "ok200: a 200 flow did not publish"
+token_absent ok200 "$OUT_OK200"
+
+# 6c. The origin may carry a path and a trailing slash: normalise it, then POST exactly /api/v1/uploads.
+run_publish ok201 "$TMP/remote-origin-path" "http://127.0.0.1:%port%/some/path/"
+python3 -I - "$LAST_JSON" "$LAST_LOG" <<'PY'
+import json, sys
+summary = json.load(open(sys.argv[1]))
+assert summary["mode"] == "remote", summary
+first = json.loads(open(sys.argv[2]).readline())
+assert (first["method"], first["path"]) == ("POST", "/api/v1/uploads"), first
+PY
+[ "$?" = 0 ] && ok "an origin with a path still creates the plan at /api/v1/uploads" \
+  || bad "an origin with a path changed the first request"
+token_absent origin-path "$TMP/remote-origin-path"
+
+# 6d. Every plan or server failure falls back to local, keeps the artifact and makes no further request.
+while IFS='|' read -r mode expected second want_count; do
+  [ -n "$mode" ] || continue
+  out="$TMP/remote-$mode"
+  SECOND_PID=""
+  extra=()
+  if [ "$second" = 1 ]; then
+    SECOND_LOG=$(mktemp)
+    : > "$SECOND_LOG"
+    fake_start ok201 "$SECOND_LOG"
+    SECOND_PID=$FAKE_PID
+    extra=("FAKE_OTHER=http://127.0.0.1:$FAKE_PORT")
+  fi
+  run_publish "$mode" "$out" "" "${extra[@]}"
+  [ "$LAST_RC" = 0 ] && ok "$mode: exits 0" || bad "$mode: exits $LAST_RC"
+  file_has "$LAST_ERR" "$expected" "$mode: stderr reports '$expected'"
+  assert_local_fallback "$mode"
+  got=$(grep -c . "$LAST_LOG")
+  [ "$got" = "$want_count" ] && ok "$mode: $want_count request(s), then stop" \
+    || bad "$mode: $got requests, want $want_count"
+  if [ "$second" = 1 ]; then
+    if [ -s "$SECOND_LOG" ]; then
+      bad "$mode: the other origin received a request"
+      sed 's/^/     /' "$SECOND_LOG"
+    else
+      ok "$mode: the other origin received no request"
+    fi
+    fake_stop_pid "$SECOND_PID"
+    SECOND_PID=""
+  fi
+  token_absent "$mode" "$out"
+done <<'ROWS'
+other-origin|upload plan points at another origin; token not sent|1|1
+other-origin-commit|upload plan points at another origin; token not sent|1|1
+bad-path|upload plan does not match the file|0|1
+bad-size|upload plan does not match the file|0|1
+two-files|upload plan does not match the file|0|1
+not-verified|upload not verified|0|2
+create-401|HTTP 401|0|1
+redirect-create|HTTP 302|1|1
+commit-500|HTTP 500|0|3
+token-in-url|server returned the token in its URL|0|3
+no-link|commit returned no link|0|3
+ROWS
+
+# 6e. A non-http(s) origin is refused before any request, exactly as before.
+OUT_FTP="$TMP/remote-ftp"
+env -u ARTIFACT_SERVER_ORIGIN -u ORCHESTRA_ARTIFACT_TOKEN_CMD \
+    ORCHESTRA_ARTIFACT_SERVER_ORIGIN="ftp://x" ARTIFACT_SERVER_AGENT_TOKEN="$REMOTE_TOKEN" \
+    python3 -I "$ARTIFACT" --repo "$REPO" --task A1 --base main --worktree "$WT" \
+      --out-dir "$OUT_FTP" --json > "$TMP/ftp.json" 2> "$TMP/ftp.err"
+LAST_RC=$?
+LAST_JSON="$TMP/ftp.json"
+LAST_ERR="$TMP/ftp.err"
+LAST_LOG=""
+[ "$LAST_RC" = 0 ] && ok "ftp origin exits 0" || bad "ftp origin exits $LAST_RC"
+file_has "$TMP/ftp.err" "origin is not http(s)" "ftp origin reports 'origin is not http(s)'"
+assert_local_fallback ftp
+[ -s "$OUT_FTP/manifest.json" ] && ok "ftp origin still saves the local artifact" || bad "ftp origin lost the artifact"
+token_absent ftp "$OUT_FTP"
 
 printf 'artifact: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
