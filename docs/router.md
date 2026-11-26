@@ -18,6 +18,7 @@ model-family properties.
 | `orchestra/ds-auto` | `deepseek/deepseek-v4-pro` | `deepseek/deepseek-flash` | interactive, DeepSeek |
 | `orchestra/gemini-auto` | `antigravity/gemini-4-carbon` | `antigravity/gemini-4-hydrogen` | interactive, Gemini |
 | `orchestra/claude-auto` | `antigravity/claude-opus-5-5` | `antigravity/claude-sonnet-5-5` | interactive, Claude |
+| `orchestra/cb-auto` | `claude-bridge/claude-opus-5-5` | `claude-bridge/claude-sonnet-5-5` | interactive, Claude Code subscription (pi-claude-bridge) |
 | `orchestra/flash-auto` | `deepseek/deepseek-flash` | `deepseek/deepseek-flash` | **workers**: one cheap model, thinking only |
 
 Override the models with `ORCHESTRA_ROUTER_STRONG` / `ORCHESTRA_ROUTER_FAST` (the `ds` profile) or

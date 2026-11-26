@@ -26,6 +26,9 @@ const PROFILE_DEFAULTS = {
   ds: { strong: DEFAULT_STRONG, fast: DEFAULT_FAST, tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high", "xhigh"] },
   gemini: { strong: "antigravity/gemini-4-carbon", fast: "antigravity/gemini-4-hydrogen", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
   claude: { strong: "antigravity/claude-opus-5-5", fast: "antigravity/claude-sonnet-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
+  // Anthropic models reached through Claude Code and the user's Claude subscription (pi-claude-bridge), not through
+  // Antigravity. Same thinking ladder as the antigravity claude profile: the bridge forwards the level to Claude Code.
+  cb: { strong: "claude-bridge/claude-opus-5-5", fast: "claude-bridge/claude-sonnet-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
   // Single-model profile for orchestra workers: every tier runs on Flash. Flash has no "medium" thinking tier
   // (its catalog map is off/low/high), so "deep" maps straight to "high" — thinking is the only knob.
   flash: { strong: DEFAULT_FAST, fast: DEFAULT_FAST, tiers: { routine: "off", standard: "low", deep: "high" }, levels: ["off", "low", "high"] },
@@ -37,6 +40,7 @@ const PROFILE_BY_ID = {
   "ds-auto": "ds",
   "gemini-auto": "gemini",
   "claude-auto": "claude",
+  "cb-auto": "cb",
   "flash-auto": "flash",
 };
 
