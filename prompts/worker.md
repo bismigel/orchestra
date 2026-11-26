@@ -5,7 +5,8 @@ Task spec: `{{SPEC}}`
 
 Read first, in this order: the repository's agent instructions (`AGENTS.md`, `CLAUDE.md` or similar, if present),
 any contributing or workflow docs they point to, then the task spec and the code it names. The repository's rules
-override this prompt.
+override this prompt. Batch independent file reads in parallel with the `read` tool in one turn instead of sequential
+shell `cat`/`sed` calls.
 
 ## You implement decisions; you do not make them
 The orchestrator has settled the design, the rules and the edge cases in the spec and in any feedback. If you meet a
