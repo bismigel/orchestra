@@ -11,7 +11,9 @@ from its instruction file (`AGENTS.md`, `CLAUDE.md`) or install the bundled skil
 3. **Make the acceptance runnable by the worker.** Name test commands and test names. Screenshots and manual steps
    are yours, listed separately as orchestrator checks.
 4. **Limit the scope.** Name the paths the worker may change and anything it must not touch.
-5. **Scout it** (anything bigger than a few files): `orchestra-worker scout <id> --spec <draft>`. A read-only worker
+5. **Scout it** (anything bigger than a few files): `orchestra-worker scout <id> --spec <draft>` (or
+   `--prompt "<text>"` for a one-off task without a spec file; add `--state` when `ORCHESTRA_STATE_CMD` is configured
+   to refresh `.orchestra/state.md` on the host before launching). A read-only worker
    (the checkout is mounted read-only) checks the draft against the code: where each named thing really lives, the
    files and tests the spec missed, the pattern to copy, whether the acceptance commands run, and the size. It costs
    cents and ends with an "add to the spec" block you can paste. You still decide what goes in; the scout only
@@ -20,7 +22,8 @@ from its instruction file (`AGENTS.md`, `CLAUDE.md`) or install the bundled skil
 
 ## Launching
 ```sh
-orchestra-worker run <task-id> --spec path/to/spec.md            # first run
+orchestra-worker run <task-id> --spec path/to/spec.md            # first run (spec file)
+orchestra-worker run <task-id> --prompt "short settled task"     # first run (inline prompt, no spec file)
 orchestra-worker run <task-id> --feedback review.md              # next round, same session
 orchestra-worker summary <task-id>                               # status, report and cost so far
 orchestra-worker status [--json]                                  # what is running now, and what died silently
@@ -61,14 +64,17 @@ Exit codes: `0` ran and reported · `3` a disallowed model answered: discard the
 
 Then, in this order:
 1. `orchestra-worker review <task>`: one screen with how the run ended, **blocking** questions (decide each one),
-   **assumed** calls (skim: small choices the worker made where the spec was silent), files changed **outside** the
+   **assumed** calls (skim: small choices the worker made where the spec was silent), `risk_notes` (answer each one),
+   files changed **outside** the
    spec's Owns/Touches, the worker's claimed checks, which proofs hold for this exact code, and a ranked diff stat.
    Start here instead of reading the report, the diff and the proofs separately. When a prove passed, it also shows
    a `candidate:` line (the run, base and tree the proofs bound to). If you changed the worktree yourself, or
    rebased it, it adds `candidate drift:` with the stat of the difference, so you see exactly what moved since the
    proof ([docs/proofs.md](proofs.md)).
-2. Read the whole diff: `orchestra-worker diff <task>` (generated files appear only in the stat). Every file the
-   review listed as outside the paths needs a reason.
+2. Read the whole diff: `orchestra-worker diff <task>` (generated files appear only in the stat; add `--rendered`
+   when `ORCHESTRA_RENDER_CMD` is set to diff the rendered output). Every file the
+   review listed as outside the paths needs a reason. Run `orchestra-worker artifact <task>` (`--local` / `--open`)
+   to write a local HTML review bundle (and optionally publish to `ORCHESTRA_ARTIFACT_SERVER`).
 3. Run the checks yourself: `orchestra-worker prove <task>`. Do not reuse the worker's results: its report is a
    claim, a proof is evidence ([docs/proofs.md](proofs.md)).
 4. **Probe.** For anything touching data, privacy, security or money, write a throwaway test with your own inputs,
@@ -90,7 +96,7 @@ what counts. Record the task's cost from `orchestra-worker summary` if you track
 **Protected base branch** (pull requests required): `orchestra-worker land <task> --pr`, or `ORCHESTRA_LAND=pr`.
 Everything up to the proven, squashed commit is the same; then it pushes that commit to `orchestra/<task>`
 (`ORCHESTRA_PR_BRANCH`) and opens a pull request with `ORCHESTRA_PR_CMD` (default: `gh pr create` when `gh` is
-installed; `none` to only push). Placeholders `{branch}`, `{base}`, `{title}`, `{body}` expand as variables, so put
+installed; [examples/forgejo-pr.sh](../examples/forgejo-pr.sh) for Forgejo/Gitea; `none` to only push). Placeholders `{branch}`, `{base}`, `{title}`, `{body}` expand as variables, so put
 them in double quotes; a title is data, never code.
 
 **Local base** (an integration branch, or a forge you cannot reach yet): set `ORCHESTRA_BASE` to the local branch

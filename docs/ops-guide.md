@@ -21,13 +21,18 @@ real state, metrics) are yours.
 1. **Ticket**: what and why, risk class, rollback.
 2. **Preflight**: blast radius, dependants, current state **measured** with a command (cite it).
    - What changes, for whom? What depends on it (search the repository and the live system)?
-   - What is the current state (measure, quote the command)? Never rely on memory or docs alone.
+   - What is the current state (measure, quote the command)? Never rely on memory or docs alone. When
+     `ORCHESTRA_STATE_CMD` is configured, `orchestra-worker scout <id> --spec <file> --state` refreshes
+     `.orchestra/state.md` on the host before launching the sandboxed scout so it can flag live drift without
+     holding credentials.
    - What is the rollback, and has it been tried?
    - Can it be rehearsed? High risk: rehearse in staging, or the PR says why it can't be.
    - Which alert or probe will tell us it broke, and does it fire today if the thing is down?
 3. **Draft**: the worker writes the diff and runs validators in its sandbox.
-4. **Review**: read the **rendered** difference (`kustomize build`/`helm template` of base vs branch,
-   diffed), not only the source diff. Check the repository's invariants line by line:
+4. **Review**: read the **rendered** difference (`orchestra-worker diff <id> --rendered` when `ORCHESTRA_RENDER_CMD`
+   is set, or `kustomize build`/`helm template` of base vs branch, diffed), not only the source diff. Run
+   `orchestra-worker artifact <id>` to bundle report, diff and proofs as HTML (local or published to Artifact Server).
+   Check the repository's invariants line by line:
    - Rendered diff of every overlay touched.
    - No `:latest` or bare tags, digests copied not typed.
    - Requests and limits.
