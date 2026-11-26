@@ -1,32 +1,34 @@
 # Orchestra router (`orchestra/auto`) and thinking levels
 
-The router is a Pi virtual model: you select one model, and it picks a physical model and thinking level per
-request. It exists because the orchestrator's model is expensive and most worker turns are not.
+The router is a Pi virtual model: you select one model, and it picks a **thinking level** per request. It never
+changes the physical model. Switching models makes the next model read the whole context again at full price (prompt
+caches are per model) and drops thinking blocks the other model cannot replay, so the model is fixed per profile and
+only the thinking level moves. If you want a smarter model for planning, delegate that to a read-only run in its own
+small context instead of swapping the session's model.
 
 Extension: `examples/pi/orchestra-router.ts`. Enable it with `ORCHESTRA_ROUTER_EXT` (workers) or by linking it
 into `~/.pi/agent/extensions/` (interactive pi).
 
 ## Profiles
 
-Each profile is one virtual model under the `orchestra` provider. Budgets (`ORCHESTRA_ROUTER_SOFT_BUDGET`,
-`ORCHESTRA_ROUTER_HARD_BUDGET`, `ORCHESTRA_ROUTER_CTX_PRESSURE`) are shared: they are session economics, not
-model-family properties.
+Each profile is one virtual model under the `orchestra` provider, with exactly one physical model. Budgets
+(`ORCHESTRA_ROUTER_SOFT_BUDGET`, `ORCHESTRA_ROUTER_HARD_BUDGET`, `ORCHESTRA_ROUTER_CTX_PRESSURE`) are shared: they are
+session economics, not model-family properties.
 
-| virtual model | strong | fast | use |
-|---|---|---|---|
-| `orchestra/auto` (alias of `ds-auto`) | `deepseek/deepseek-v4-pro` | `deepseek/deepseek-flash` | interactive; legacy id |
-| `orchestra/ds-auto` | `deepseek/deepseek-v4-pro` | `deepseek/deepseek-flash` | interactive, DeepSeek |
-| `orchestra/gemini-auto` | `antigravity/gemini-4-carbon` | `antigravity/gemini-4-hydrogen` | interactive, Gemini |
-| `orchestra/claude-auto` | `antigravity/claude-opus-5-5` | `antigravity/claude-sonnet-5-5` | interactive, Claude |
-| `orchestra/cb-auto` | `claude-bridge/claude-opus-5-5` | `claude-bridge/claude-sonnet-5-5` | interactive, Claude Code subscription (pi-claude-bridge) |
-| `orchestra/flash-auto` | `deepseek/deepseek-flash` | `deepseek/deepseek-flash` | **workers**: one cheap model, thinking only |
+| virtual model | model | use |
+|---|---|---|
+| `orchestra/auto` (alias of `ds-auto`) | `deepseek/deepseek-v4-pro` | interactive; legacy id |
+| `orchestra/ds-auto` | `deepseek/deepseek-v4-pro` | interactive, DeepSeek |
+| `orchestra/gemini-auto` | `antigravity/gemini-4-carbon` | interactive, Gemini |
+| `orchestra/claude-auto` | `antigravity/claude-opus-5-5` | interactive, Claude |
+| `orchestra/cb-auto` | `claude-bridge/claude-opus-5-5` | interactive, Claude Code subscription (pi-claude-bridge) |
+| `orchestra/flash-auto` | `deepseek/deepseek-flash` | **workers**: the one cheap model |
 
-Override the models with `ORCHESTRA_ROUTER_STRONG` / `ORCHESTRA_ROUTER_FAST` (the `ds` profile) or
-`ORCHESTRA_ROUTER_<PROFILE>_STRONG` / `_FAST` (the others).
+Override a model with `ORCHESTRA_ROUTER_MODEL` (the `ds` profile) or `ORCHESTRA_ROUTER_<PROFILE>_MODEL` (the others).
+The old `ORCHESTRA_ROUTER_STRONG` pin still works as an alias; `ORCHESTRA_ROUTER_FAST` is ignored.
 
-`flash-auto` exists because workers must stay on one cheap model (AGENTS.md: workers run on DeepSeek Flash).
-Both its strong and fast slots point at Flash, so the *model* never changes and only *thinking* adjusts per turn.
-The post-run `ORCHESTRA_ALLOWED_MODELS` guard still applies: any other physical model fails the run with exit 3.
+`flash-auto` exists because workers must stay on one cheap model (AGENTS.md: workers run on DeepSeek Flash). The post-run
+`ORCHESTRA_ALLOWED_MODELS` guard still applies: any other physical model fails the run with exit 3.
 
 ## Thinking levels: frugal by default
 
@@ -35,18 +37,22 @@ they pay. The mapping is per profile (`tiers` in `PROFILE_DEFAULTS`):
 
 | tier | ds / gemini / claude | flash (workers) |
 |---|---|---|
-| routine | fast `off` | `off` |
-| standard | strong `low` | `low` |
-| deep | strong `medium` (`high` only when the virtual level is explicitly `high`) | `high` |
+| routine | `off` | `off` |
+| standard | `low` | `low` |
+| deep | `medium` (`high` only when the virtual level is explicitly `high`) | `high` |
 
-`xhigh` is never emitted. `clampLevel()` maps a requested level onto the levels a profile's physical models
-actually offer, never raising the request — Flash has no `medium` tier, so `medium` clamps to `low`.
+`xhigh` is never emitted. `clampLevel()` maps a requested level onto the levels a profile's physical model
+actually offers, never raising the request — Flash has no `medium` tier, so `medium` clamps to `low`.
 
-Continuation turns stay sticky on the same model (prompt cache) and only walk the level: a failing tool result
-(`BLOCKING`, `RISK NOTES`, `FAIL`, a non-zero exit) bumps to at least `medium` (strong) / `low` (fast), and two
+Continuation turns keep the model and only walk the level: a failing tool result (`BLOCKING`, `RISK NOTES`, `FAIL`, a
+non-zero exit) bumps to at least the deep level (the standard level when the turn started routine), and two
 consecutive clean tool results step the level down one notch.
 
-`direct` requests — compaction summaries and extension calls — always run on the fast model with thinking off.
+Spend and context only lower the level: past the soft budget or the context-pressure threshold a standard or routine
+turn steps down one notch and a deep `high` turn is capped at `medium`; past the hard budget routine is `off` and
+everything else is capped at `low`.
+
+`direct` requests — compaction summaries and extension calls — run on the same model with thinking off.
 
 ## Benchmark: is `low` too low?
 
@@ -92,9 +98,9 @@ and makes no model calls.
 
 ## Failure behaviour
 
-- A physical model missing from the catalog (provider not loaded, no credentials) fails over to the other model
-  in the pair instead of failing the turn. Only when neither resolves does routing raise an error.
-- `retry` after a provider overload (429/503/529) switches to the other model in the pair; any other error stays
-  sticky so the prompt cache survives.
+- A model missing from the catalog (provider not loaded, no credentials) raises a setup error. There is no
+  alternate model to fall back to.
+- `retry` always keeps the failed request's model, including after a provider overload (429/503/529): pi backs off
+  and retries the same route.
 - `/router` prints the last route: profile, model, level, tier, reason, spend against the budgets, context
-  percentage, cache hit rate, classifier, and any fallback taken.
+  percentage, cache hit rate and classifier.
