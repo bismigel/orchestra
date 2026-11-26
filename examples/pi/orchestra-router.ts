@@ -57,8 +57,23 @@ function num(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** "provider/id" for a model reference: Pi passes catalog Model objects in request.previous/failed. */
+function refOf(model) {
+  if (!model) return "";
+  if (typeof model === "string") return model;
+  if (typeof model === "object" && model.id) return model.provider ? `${model.provider}/${model.id}` : String(model.id);
+  return "";
+}
+
+/** previous/failed with the model normalised to a "provider/id" string (null when there is no model). */
+function normalizeRoute(route) {
+  if (!route || typeof route !== "object") return null;
+  const model = refOf(route.model);
+  return model ? { ...route, model } : null;
+}
+
 function splitModel(ref) {
-  const s = String(ref || "");
+  const s = refOf(ref);
   const i = s.indexOf("/");
   return i > 0 ? { provider: s.slice(0, i), id: s.slice(i + 1) } : { provider: "", id: s };
 }
@@ -307,8 +322,8 @@ export function decideRoute(request = {}) {
   const messages = Array.isArray(request.messages) ? request.messages : [];
   const usage = request.usage || {};
   const virtualLevel = request.virtualLevel || request.thinkingLevel || "medium";
-  const previous = request.previous || null;
-  const failed = request.failed || null;
+  const previous = normalizeRoute(request.previous);
+  const failed = normalizeRoute(request.failed);
   const stateIn = normalizeState(request.state);
 
   if (reason === "direct") {
@@ -471,13 +486,13 @@ export function isOverloadError(message) {
 }
 
 function modelRef(model) {
-  return model ? `${model.provider}/${model.id}` : "";
+  return refOf(model);
 }
 
 function resolveModel(ctx, ref) {
   const { provider, id } = splitModel(ref);
   const found = ctx && ctx.modelRegistry && ctx.modelRegistry.find ? ctx.modelRegistry.find(provider, id) : null;
-  if (!found) throw new Error(`orchestra/auto: physical model ${ref} is not in the catalog`);
+  if (!found) throw new Error(`orchestra/auto: physical model ${refOf(ref) || JSON.stringify(ref)} is not in the catalog`);
   return found;
 }
 

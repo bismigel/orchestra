@@ -238,6 +238,45 @@ await t("a blocking tool result is deep before any classifier call", async () =>
   eq(r.tier, "deep", "tier");
 });
 
+// Pi passes catalog Model objects (not "provider/id" strings) in request.previous.model and request.failed.model.
+const modelObj = (ref) => { const [provider, id] = ref.split("/"); return { provider, id, name: id, api: "x" }; };
+await t("continuation accepts a Model object in previous and stays sticky", () => {
+  const r = m.decideRoute({ reason: "continuation", previous: { model: modelObj(cfg.strong), thinkingLevel: "high" }, messages: [user("go")], config: cfg });
+  eq(r.model, cfg.strong, "model");
+  eq(r.thinkingLevel, "high", "thinking");
+  eq(r.state.lastModel, cfg.strong, "state stores the string ref");
+});
+await t("retry accepts a Model object in failed and fails over on overload", () => {
+  const r = m.decideRoute({ reason: "retry", failed: { model: modelObj(cfg.strong), thinkingLevel: "high", message: { errorMessage: "HTTP 529 overloaded" } }, config: cfg });
+  eq(r.model, cfg.fast, "model");
+});
+await t("retry accepts a Model object in failed and stays sticky otherwise", () => {
+  const r = m.decideRoute({ reason: "retry", failed: { model: modelObj(cfg.fast), thinkingLevel: "low", message: { errorMessage: "invalid api key" } }, config: cfg });
+  eq(r.model, cfg.fast, "model");
+  eq(r.thinkingLevel, "low", "thinking");
+});
+await t("user turn with a Model object in previous keeps cache hysteresis", () => {
+  const r = m.decideRoute({ reason: "user", tier: "standard", previous: { model: modelObj(cfg.strong), thinkingLevel: "high" }, messages: [user("implement the helper")], usage: { cost: 5, contextPct: 0.25, contextTokens: 50000 }, config: cfg });
+  eq(r.model, cfg.strong, "model");
+});
+await t("route() resolves Model objects from Pi's previous/failed through the registry", async () => {
+  const saved = { s: process.env.ORCHESTRA_ROUTER_STRONG, f: process.env.ORCHESTRA_ROUTER_FAST };
+  process.env.ORCHESTRA_ROUTER_STRONG = cfg.strong;
+  process.env.ORCHESTRA_ROUTER_FAST = cfg.fast;
+  let vm;
+  try {
+    m.default({ registerVirtualModel: (d) => { vm = d; }, registerCommand: () => {} });
+  } finally {
+    if (saved.s === undefined) delete process.env.ORCHESTRA_ROUTER_STRONG; else process.env.ORCHESTRA_ROUTER_STRONG = saved.s;
+    if (saved.f === undefined) delete process.env.ORCHESTRA_ROUTER_FAST; else process.env.ORCHESTRA_ROUTER_FAST = saved.f;
+  }
+  const catalog = [modelObj(cfg.strong), modelObj(cfg.fast)];
+  const ctx = { modelRegistry: { find: (p, id) => catalog.find((c) => c.provider === p && c.id === id) } };
+  const cont = await vm.route({ reason: "continuation", thinkingLevel: "medium", messages: [user("go")], previous: { model: catalog[0], thinkingLevel: "high" } }, ctx);
+  eq(cont.model, catalog[0], "continuation model");
+  const retry = await vm.route({ reason: "retry", thinkingLevel: "medium", messages: [user("go")], failed: { model: catalog[1], thinkingLevel: "low", message: { errorMessage: "invalid api key" } } }, ctx);
+  eq(retry.model, catalog[1], "retry model");
+});
 console.log(`part1: ${pass} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);
 JS
