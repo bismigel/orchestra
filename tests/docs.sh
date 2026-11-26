@@ -94,7 +94,7 @@ main() {
 
   echo "--- guide works"
   local name path rc
-  for name in orchestrator planning ops security proofs design harness router; do
+  for name in orchestrator planning ops security proofs design harness router jev; do
     path=$("$W" guide "$name" 2>/dev/null); rc=$?
     if [ "$rc" = 0 ] && [ -f "$path" ]; then ok "guide $name prints an existing file"
     else bad "guide $name: rc $rc, '$path' is not an existing file"; fi

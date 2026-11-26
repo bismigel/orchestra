@@ -23,6 +23,11 @@
 #                                             remove worktrees of landed tasks (lists them without --yes)
 #   orchestra-worker history [--json]         every task's runs, cost and outcome, including cleaned-up ones
 #   orchestra-worker lessons <task-id>        draft lessons.md lines from a run's spec gaps
+#   orchestra-worker decide split|ready <task-id> [--spec <file>]
+#   orchestra-worker decide triage <task-id> [--worktree <dir>]
+#                                             Jev's advisory second opinion (ORCHESTRA_JEV=shadow|advise): flags, never approves
+#   orchestra-worker decide mark <task-id> <kind> <value>   record your own call, to compare with Jev's
+#   orchestra-worker decide report [--json]   Jev against your calls
 #   orchestra-worker doctor                   check the setup: sandbox, harness, key, model, base, gate
 #   orchestra-worker guide [<name>] [--print] path of a guide: orchestrator, planning, ops, security, proofs, …
 #
@@ -56,10 +61,11 @@ main() {
     clean) cmd_clean "$here" "$@" ;;
     history) cmd_history "$here" "$@" ;;
     lessons) cmd_lessons "$here" "$@" ;;
+    decide) cmd_decide "$here" "$@" ;;
     doctor) cmd_doctor "$here" "$@" ;;
     guide|docs) cmd_guide "$here" "$@" ;;
     -h|--help|help|"") sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; return 0 ;;
-    *) die "unknown command: $cmd (try: run, status, watch, review, scout, prove, land, clean, history, doctor, guide)" ;;
+    *) die "unknown command: $cmd (try: run, status, watch, review, scout, decide, prove, land, clean, history, doctor, guide)" ;;
   esac
 }
 
@@ -101,6 +107,14 @@ load_config() {
   ORCHESTRA_GATE=${ORCHESTRA_GATE:-}                            # the repository's landing gate, one shell command
   ORCHESTRA_TASKS_DIR=${ORCHESTRA_TASKS_DIR:-docs/work/tasks}
   ORCHESTRA_PUSH_CMD=${ORCHESTRA_PUSH_CMD:-"git push origin HEAD:refs/heads/{branch}"}
+  ORCHESTRA_JEV=${ORCHESTRA_JEV:-off}                           # off | shadow | advise: Jev classifier second opinion
+  ORCHESTRA_JEV_MODEL=${ORCHESTRA_JEV_MODEL:-typesafe/jev}      # Cloudflare Workers AI model id
+  ORCHESTRA_JEV_ACCOUNT_ID=${ORCHESTRA_JEV_ACCOUNT_ID:-}        # Cloudflare account id (not a secret)
+  ORCHESTRA_JEV_KEY_CMD=${ORCHESTRA_JEV_KEY_CMD:-}              # prints a Workers-AI-only API token; never stored
+  ORCHESTRA_JEV_URL=${ORCHESTRA_JEV_URL:-}                      # override the endpoint ({account} is substituted)
+  ORCHESTRA_JEV_TIMEOUT=${ORCHESTRA_JEV_TIMEOUT:-20}
+  ORCHESTRA_JEV_REDACT=${ORCHESTRA_JEV_REDACT:-}                # extra regex to remove from what Jev sees
+  case "$ORCHESTRA_JEV" in off|shadow|advise) ;; *) die "ORCHESTRA_JEV must be off, shadow or advise (got '$ORCHESTRA_JEV')" ;; esac
   ORCHESTRA_GENERATED=${ORCHESTRA_GENERATED:-*_templ.go *.pb.go *_gen.go *.gen.go *.min.js *.min.css go.sum package-lock.json yarn.lock pnpm-lock.yaml Cargo.lock poetry.lock uv.lock}
   [ "${ORCHESTRA_NEEDS_MODEL:-1}" = 0 ] && return 0
   [ -n "$ORCHESTRA_MODEL" ] || die "set ORCHESTRA_MODEL (provider/model, e.g. deepseek/deepseek-flash) in config.env"
@@ -191,6 +205,10 @@ cmd_run() {
   elif [ -z "$feedback" ] && [ ! -f "$wt/$spec" ]; then
     # The worker sees only the worktree: a spec that lives elsewhere (uncommitted, another repo) is copied in.
     cp "$spec" "$state/spec.md"; spec=".orchestra/spec.md"
+  fi
+  if [ -z "$feedback" ] && [ -z "$prompt_spec" ] && [ "$dry" = 0 ]; then
+    jev_auto "$here" "$repo" split "$task" --spec "$wt/$spec"
+    jev_auto "$here" "$repo" ready "$task" --spec "$wt/$spec"
   fi
   check_fresh "$wt" "$spec" "$ORCHESTRA_BASE" "$dry" "$allow_stale" "$feedback"
   grep -qxF '.orchestra/*' "$common/info/exclude" 2>/dev/null || printf '%s\n' '.orchestra/*' '!.orchestra/config.env' >> "$common/info/exclude"
@@ -785,9 +803,93 @@ cmd_review() {
   [ -n "$task" ] || die "usage: orchestra-worker review <task-id> [--json] [--worktree <dir>]"
   local repo state; task_setup "$task" "$wt"
   local -a extra=(); [ "$json" = 1 ] && extra=(--json)
+  local rc=0
   python3 -I "$here/lib/review.py" --task "$task" --worktree "$wt" --base "$ORCHESTRA_BASE" \
     --spec "$(spec_file "$wt" "$task")" --generated "$ORCHESTRA_GENERATED" --checks "$(checks "$wt" "$task")" \
-    --tree "$(work_tree "$wt")" "${extra[@]}"
+    --tree "$(work_tree "$wt")" "${extra[@]}" || rc=$?
+  # Jev's second opinion goes after the digest, and only on the text screen: --json stays one parseable object.
+  [ "$rc" = 0 ] && [ "$json" = 0 ] && jev_triage_auto "$here" "$repo" "$task" "$wt"
+  return "$rc"
+}
+
+# ---- Jev: an advisory second opinion (lib/decide.py, config/decisions.json, docs/jev.md) ---------------------------
+# ORCHESTRA_JEV=off makes no call at all. shadow logs Jev's answer; advise also prints a line when Jev wants a closer
+# look than you or the review facts already give. Jev never approves anything and a failure never changes an exit code.
+decisions_log() { echo "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)/orchestra/decisions.jsonl"; }
+
+# jev_run <here> <repo> <print: always|flags|never> <mode> <kind> <task> [decide.py args]: one call, never fails the caller.
+jev_run() {
+  local here=$1 repo=$2 pr=$3 mode=$4 kind=$5 task=$6; shift 6
+  local decisions="$here/config/decisions.json"
+  [ -f "$repo/.orchestra/decisions.json" ] && decisions="$repo/.orchestra/decisions.json"   # a repository's own questions win
+  env ORCHESTRA_JEV_MODEL="$ORCHESTRA_JEV_MODEL" ORCHESTRA_JEV_ACCOUNT_ID="$ORCHESTRA_JEV_ACCOUNT_ID" \
+    ORCHESTRA_JEV_KEY_CMD="$ORCHESTRA_JEV_KEY_CMD" ORCHESTRA_JEV_URL="$ORCHESTRA_JEV_URL" \
+    ORCHESTRA_JEV_TIMEOUT="$ORCHESTRA_JEV_TIMEOUT" ORCHESTRA_JEV_REDACT="$ORCHESTRA_JEV_REDACT" \
+    python3 -I "$here/lib/decide.py" run --kind "$kind" --task "$task" --log "$(decisions_log "$repo")" \
+    --decisions "$decisions" --print "$pr" --mode "$mode" "$@" || true
+}
+
+# jev_auto <here> <repo> <kind> <task> [decide.py args]: the hook the other commands call; a no-op when off.
+jev_auto() {
+  local here=$1 repo=$2 kind=$3 task=$4; shift 4
+  case "$ORCHESTRA_JEV" in
+    shadow) jev_run "$here" "$repo" never shadow "$kind" "$task" "$@" ;;
+    advise) jev_run "$here" "$repo" flags advise "$kind" "$task" "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
+# review_json <here> <task> <wt> <out>: the review digest as JSON in a file (what triage reads).
+review_json() {
+  local here=$1 task=$2 wt=$3 out=$4
+  python3 -I "$here/lib/review.py" --task "$task" --worktree "$wt" --base "$ORCHESTRA_BASE" \
+    --spec "$(spec_file "$wt" "$task")" --generated "$ORCHESTRA_GENERATED" --checks "$(checks "$wt" "$task")" \
+    --tree "$(work_tree "$wt")" --json > "$out"
+}
+
+jev_triage_auto() {
+  local here=$1 repo=$2 task=$3 wt=$4 tmp
+  [ "$ORCHESTRA_JEV" = off ] && return 0
+  tmp=$(mktemp); review_json "$here" "$task" "$wt" "$tmp" 2>/dev/null && jev_auto "$here" "$repo" triage "$task" --review-json "$tmp"
+  rm -f "$tmp"; return 0
+}
+
+# cmd_decide: ask Jev by hand, record your own call, or compare the two.
+cmd_decide() {
+  local here=$1; shift
+  local sub=${1:-}; shift || true
+  local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
+  ORCHESTRA_NEEDS_MODEL=0 load_config "$repo"
+  local log; log=$(decisions_log "$repo")
+  case "$sub" in
+    report)
+      local -a extra=(); [ "${1:-}" = --json ] && extra=(--json)
+      python3 -I "$here/lib/decide.py" report --log "$log" "${extra[@]}" ;;
+    mark)
+      [ $# -eq 3 ] || die "usage: orchestra-worker decide mark <task-id> <kind> <value>"
+      [[ $1 =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
+      python3 -I "$here/lib/decide.py" mark --log "$log" --task "$1" --kind "$2" --value "$3" ;;
+    split|ready|triage)
+      local kind=$sub task="" spec="" wt=""
+      while [ $# -gt 0 ]; do case "$1" in
+        --spec) spec=${2:?}; shift 2 ;;
+        --worktree) wt=${2:?}; shift 2 ;;
+        -*) die "unknown option $1" ;;
+        *) task=$1; shift ;;
+      esac; done
+      [ -n "$task" ] || die "usage: orchestra-worker decide $kind <task-id>$([ "$kind" = triage ] && echo ' [--worktree <dir>]' || echo ' [--spec <file>]')"
+      [ "$ORCHESTRA_JEV" != off ] || die "ORCHESTRA_JEV=off: set it to shadow or advise (and ORCHESTRA_JEV_ACCOUNT_ID, ORCHESTRA_JEV_KEY_CMD) to ask Jev; docs/jev.md"
+      if [ "$kind" = triage ]; then
+        local state; task_setup "$task" "$wt"
+        local tmp; tmp=$(mktemp); review_json "$here" "$task" "$wt" "$tmp" || { rm -f "$tmp"; die "review failed for $task"; }
+        jev_run "$here" "$repo" always "$ORCHESTRA_JEV" triage "$task" --review-json "$tmp"; rm -f "$tmp"
+      else
+        if [ -z "$spec" ]; then local state; task_setup "$task" "$wt"; spec=$(spec_file "$wt" "$task"); fi
+        [ -f "$spec" ] || die "no spec found for $task: pass --spec <file>"
+        jev_run "$here" "$repo" always "$ORCHESTRA_JEV" "$kind" "$task" --spec "$spec"
+      fi ;;
+    *) die "usage: orchestra-worker decide split|ready <task-id> [--spec <file>] | triage <task-id> | mark <task-id> <kind> <value> | report [--json]" ;;
+  esac
 }
 
 # ledger_file <repo>: where cleaned-up tasks are archived (one JSON line each). Inside the git common dir: never
@@ -898,6 +1000,15 @@ cmd_doctor() {
     if [[ $ORCHESTRA_MAX_COST =~ ^[0-9]+(\.[0-9]+)?$ ]]; then ok_ "budget: at most \$$ORCHESTRA_MAX_COST per run"
     else fail_ "ORCHESTRA_MAX_COST must be a number of dollars (got '$ORCHESTRA_MAX_COST')"; fi
   else echo "info  no ORCHESTRA_MAX_COST: runs are limited by ORCHESTRA_TIMEOUT ($ORCHESTRA_TIMEOUT) only"; fi
+  if [ "$ORCHESTRA_JEV" = off ]; then echo "info  jev: off (ORCHESTRA_JEV=shadow|advise turns on the second opinion; docs/jev.md)"
+  else
+    local jev_problem=""
+    [ -n "$ORCHESTRA_JEV_KEY_CMD" ] || jev_problem="ORCHESTRA_JEV_KEY_CMD is not set"
+    local jev_url=${ORCHESTRA_JEV_URL:-https://api.cloudflare.com/client/v4/accounts/\{account\}/ai/run}
+    case $jev_url in *'{account}'*) [ -n "$ORCHESTRA_JEV_ACCOUNT_ID" ] || jev_problem="ORCHESTRA_JEV_ACCOUNT_ID is not set" ;; esac
+    if [ -n "$jev_problem" ]; then warn_ "jev: $ORCHESTRA_JEV but $jev_problem (decisions will be logged as unavailable)"
+    else ok_ "jev: $ORCHESTRA_JEV, model $ORCHESTRA_JEV_MODEL, key from ORCHESTRA_JEV_KEY_CMD (not run here)"; fi
+  fi
   local base_dir; base_dir="$(dirname "$repo")/$(basename "$repo")-worktrees"
   local stale; stale=$(cmd_status "$here" --json 2>/dev/null | python3 -I -c 'import json,sys; print(sum(1 for r in json.load(sys.stdin)["runs"] if r["state"] == "stale"))' 2>/dev/null || echo 0)
   [ "${stale:-0}" = 0 ] || warn_ "$stale stale run state file(s): orchestra-worker status --prune"
@@ -920,8 +1031,9 @@ cmd_guide() {
     design) f=design.md ;;
     harness) f=adding-a-harness.md ;;
     router) f=router.md ;;
+    jev|decide) f=jev.md ;;
     templates) echo "$here/templates"; return 0 ;;
-    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, router, templates)" ;;
+    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, router, jev, templates)" ;;
   esac
   if [ "$print" = 1 ]; then cat "$here/docs/$f"; else echo "$here/docs/$f"; fi
 }

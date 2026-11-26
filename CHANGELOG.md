@@ -1,6 +1,15 @@
 # Changelog
 
 ## 0.8.0 (unreleased)
+- **Jev, an advisory second opinion** (`ORCHESTRA_JEV=off|shadow|advise`, off by default; [docs/jev.md](docs/jev.md)).
+`orchestra-worker decide split|ready|triage` asks a classifier model (Jev on Cloudflare Workers AI, or any endpoint
+speaking the same body) three typed questions from `config/decisions.json`: worker, split or orchestrator for a spec;
+five yes/no readiness checks; clean, look or block for a finished run. `run --spec` asks `split` and `ready`, text
+`review` asks `triage`. Jev can only ask for a closer look: `triage` has a deterministic floor from the review facts,
+and a verdict below it is never shown. State is whitelisted, redacted and capped; the token comes from
+`ORCHESTRA_JEV_KEY_CMD`, never a file, log or output; a failure is logged and never changes an exit code. Answers go
+to `<git dir>/orchestra/decisions.jsonl`; `decide mark` records your call and `decide report` compares the two.
+New: `lib/decide.py`, `config/decisions.json`, `tests/decide.sh`, `orchestra-worker guide jev`.
 - **`prove` records a candidate snapshot** in `.orchestra/candidate.json`: task, run, base and the commit it resolved
 to, the tree hash the proofs bound to, the spec and its blob hash, and the time. `review` shows a `candidate:` line,
 and both `review` (text and `--json`) and `land` report `candidate drift` with a stat when the worktree changed since.
