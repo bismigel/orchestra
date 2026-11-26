@@ -98,3 +98,13 @@ delegated to workers.
 | Edge and DNS | provider API or MCP | read; changes through IaC PRs |
 | Secrets | helpers that don't print, never an MCP | never in context |
 | Docs | fetch upstream changelogs and references | read |
+
+## Artifact Server
+Every review artifact is written to the local artifacts folder first, then published to the Artifact Server when
+`ORCHESTRA_ARTIFACT_SERVER_ORIGIN` and a token are configured. A failed publish never loses the local copy: it
+prints one warning and the artifact stays local.
+Publishing follows the server-issued upload plan: create it (`POST /api/v1/uploads`), `PUT` the bytes to the
+planned URL, then commit; the commit's `links.review` is the review link.
+The token comes from `ORCHESTRA_ARTIFACT_TOKEN_CMD` (a command that prints it) or `ARTIFACT_SERVER_AGENT_TOKEN`.
+It is never printed, never written to the artifact and never sent to a host the plan names that is not the
+configured origin.

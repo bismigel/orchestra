@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import fnmatch
 import glob
+import hashlib
 import html
 import json
 import os
@@ -23,6 +24,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import task_lint  # noqa: E402  (same directory; imported, never edited)
@@ -880,8 +882,82 @@ def remote_token():
     return result.stdout.strip()
 
 
+ARTIFACT_UA = "orchestra-artifact"
+ARTIFACT_TIMEOUT = 30
+ENTRY_PATH = "index.html"
+ENTRY_MEDIA_TYPE = "text/html; charset=utf-8"
+
+
+def origin_key(value):
+    """(scheme, host, port) of an absolute http(s) URL, or None when it is not one."""
+    try:
+        parts = urllib.parse.urlsplit(value or "")
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or not parts.hostname:
+        return None
+    return scheme, parts.hostname.lower(), port
+
+
+def normalised_origin(origin):
+    """scheme://netloc, with any path, query, fragment and trailing slash dropped; '' when not http(s)."""
+    try:
+        parts = urllib.parse.urlsplit(origin or "")
+        port = parts.port
+    except ValueError:
+        return ""
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or not parts.hostname:
+        return ""
+    host = parts.hostname.lower()
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return f"{scheme}://{netloc}"
+
+
+def redact(text, token):
+    """Every reason that leaves publish_remote has the token replaced."""
+    if token:
+        return str(text).replace(token, "***")
+    return str(text)
+
+
+def artifact_request(opener, method, url, token, payload=None, content_type="", extra_headers=None):
+    """One request to the Artifact Server. Returns (status, body, reason); reason is set on a network error."""
+    headers = {"User-Agent": ARTIFACT_UA, "Authorization": f"Bearer {token}"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if extra_headers:
+        headers.update(extra_headers)
+    try:
+        request = urllib.request.Request(url, data=payload, method=method, headers=headers)
+        with opener.open(request, timeout=ARTIFACT_TIMEOUT) as response:
+            status = int(getattr(response, "status", None) or response.getcode() or 0)
+            return status, response.read(), ""
+    except urllib.error.HTTPError as e:
+        # A redirect is not followed here (NoRedirect): its 3xx surfaces as this HTTPError.
+        try:
+            e.close()
+        except OSError:
+            pass
+        return int(e.code), b"", ""
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return 0, b"", redact(short(getattr(e, "reason", e), 120), token)
+
+
+def json_object(body):
+    try:
+        data = json.loads(body.decode("utf-8", errors="replace"))
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def publish_remote(origin, token, path, task):
-    """Best-effort publish. Returns (url, reason); never logs or returns the token."""
+    """Best-effort publish through the upload-plan API. Returns (url, reason); never logs or returns the token."""
     if not origin:
         return "", "no origin"
     if not re.match(r"^https?://", origin, re.I):
@@ -908,46 +984,103 @@ def publish_remote(origin, token, path, task):
                 return line, ""
             return origin, ""
 
-    with open(path, "rb") as f:
-        payload_bytes = f.read()
-    request = urllib.request.Request(
-        origin,
-        data=payload_bytes,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "text/html; charset=utf-8",
-            "User-Agent": "orchestra-artifact",
-            "X-Orchestra-Task": task,
-        },
-    )
+    def fail(message):
+        return "", redact(message, token)
+
+    base = normalised_origin(origin)
+    if not base:
+        return fail("origin is not http(s)")
+    base_key = origin_key(base)
+
+    try:
+        with open(path, "rb") as f:
+            payload_bytes = f.read()
+    except OSError as e:
+        return fail(short(e, 120))
+
+    def points_at_origin(value):
+        return origin_key(value) == base_key
+
     opener = urllib.request.build_opener(NoRedirect)
-    try:
-        with opener.open(request, timeout=10) as response:
-            status = getattr(response, "status", 0)
-            body = response.read()
-    except urllib.error.HTTPError as e:
-        return "", f"HTTP {e.code}"
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        reason = short(getattr(e, "reason", e), 120)
-        if token:
-            reason = reason.replace(token, "***")
-        return "", reason
-    if status < 200 or status >= 300:
-        return "", f"HTTP {status}"
+
+    # 1. Create the upload plan. The bearer token has only gone to the configured origin so far.
+    plan_body = {
+        "entryPath": ENTRY_PATH,
+        "routingMode": "static",
+        "files": [{
+            "path": ENTRY_PATH,
+            "mediaType": ENTRY_MEDIA_TYPE,
+            "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "size": len(payload_bytes),
+        }],
+    }
+    status, body, reason = artifact_request(
+        opener, "POST", base + "/api/v1/uploads", token,
+        json.dumps(plan_body).encode("utf-8"), "application/json")
+    if reason:
+        return fail(reason)
+    if status not in (200, 201):
+        return fail(f"HTTP {status}")
+
+    plan = json_object(body)
+    plan_files = plan.get("files") if isinstance(plan.get("files"), list) else []
+    planned = plan_files[0] if plan_files and isinstance(plan_files[0], dict) else {}
+    commit_url = plan.get("commitUrl") if isinstance(plan.get("commitUrl"), str) else ""
+    upload_url = planned.get("uploadUrl") if isinstance(planned.get("uploadUrl"), str) else ""
+
+    # 4. Validate the whole plan before the token goes anywhere else: no request to a host the plan names.
+    if not points_at_origin(commit_url) or not points_at_origin(upload_url):
+        return fail("upload plan points at another origin; token not sent")
+    planned_size = planned.get("size")
+    if (len(plan_files) != 1
+            or planned.get("path") != ENTRY_PATH
+            or planned.get("method") != "PUT"
+            or isinstance(planned_size, bool)
+            or not isinstance(planned_size, int)
+            or planned_size != len(payload_bytes)):
+        return fail("upload plan does not match the file")
+
+    # 2. Upload the bytes to the server-issued URL.
+    status, body, reason = artifact_request(
+        opener, "PUT", upload_url, token, payload_bytes, ENTRY_MEDIA_TYPE)
+    if reason:
+        return fail(reason)
+    if status not in (200, 201):
+        return fail(f"HTTP {status}")
+    uploaded = json_object(body)
+    if uploaded.get("status") != "verified" or uploaded.get("path") != ENTRY_PATH:
+        return fail("upload not verified")
+
+    # 3. Commit: this creates the artifact; its review link is the URL the caller gets back.
+    commit_body = {
+        "target": {
+            "kind": "new_artifact",
+            "accessSetting": "account_required",
+            "name": f"{task} review",
+            "tags": ["orchestra"],
+        },
+    }
+    status, body, reason = artifact_request(
+        opener, "POST", commit_url, token, json.dumps(commit_body).encode("utf-8"), "application/json",
+        {"Idempotency-Key": str(uuid.uuid4())})
+    if reason:
+        return fail(reason)
+    if status not in (200, 201):
+        return fail(f"HTTP {status}")
+
+    committed = json_object(body)
+    links = committed.get("links") if isinstance(committed.get("links"), dict) else {}
     url = ""
-    try:
-        payload = json.loads(body.decode("utf-8", errors="replace"))
-        if isinstance(payload, dict):
-            for key in ("url", "review_url", "html_url", "href"):
-                if isinstance(payload.get(key), str) and payload[key]:
-                    url = payload[key]
-                    break
-    except ValueError:
-        pass
-    if url and token and token in url:
+    for key in ("review", "artifact"):
+        candidate = links.get(key)
+        if isinstance(candidate, str) and http_url(candidate):
+            url = candidate
+            break
+    if not url:
+        return fail("commit returned no link")
+    if token and token in url:
         return "", "server returned the token in its URL"
-    return url or origin, ""
+    return url, ""
 
 
 def open_target(target):
