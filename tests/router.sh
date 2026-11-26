@@ -47,25 +47,25 @@ await t("defaults are the documented physical models", () => {
   const s = m.decideRoute({ reason: "user", messages: [user("add a helper")] });
   eq(s.model, "deepseek/deepseek-v4-pro", "default strong");
 });
-await t("routine prompt routes to fast:low", () => {
+await t("routine prompt routes to fast:off", () => {
   const r = m.decideRoute({ reason: "user", messages: [user("status please")], config: cfg });
   eq(r.model, cfg.fast, "model");
+  eq(r.thinkingLevel, "off", "thinking");
+});
+await t("standard prompt routes to strong:low", () => {
+  const r = m.decideRoute({ reason: "user", messages: [user("add a small helper function in src/greet.ts")], config: cfg });
+  eq(r.model, cfg.strong, "model");
   eq(r.thinkingLevel, "low", "thinking");
 });
-await t("standard prompt routes to strong:medium", () => {
-  const r = m.decideRoute({ reason: "user", messages: [user("add a small helper function in src/greet.ts")], config: cfg });
+await t("deep prompt routes to strong:medium", () => {
+  const r = m.decideRoute({ reason: "user", messages: [user("investigate the security incident across the network and cnpg")], config: cfg });
   eq(r.model, cfg.strong, "model");
   eq(r.thinkingLevel, "medium", "thinking");
 });
-await t("deep prompt routes to strong:high", () => {
-  const r = m.decideRoute({ reason: "user", messages: [user("investigate the security incident across the network and cnpg")], config: cfg });
-  eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "high", "thinking");
-});
-await t("deep prompt uses xhigh when the virtual level is high", () => {
+await t("deep prompt escalates to high only on an explicit high virtual level", () => {
   const r = m.decideRoute({ reason: "user", messages: [user("investigate the security incident across the network and cnpg")], virtualLevel: "high", config: cfg });
   eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "xhigh", "thinking");
+  eq(r.thinkingLevel, "high", "thinking");
 });
 await t("classifyDeterministic scores routine and high-judgment words", () => {
   eq(m.classifyDeterministic("please lint and format this", "", "medium"), "routine", "routine");
@@ -89,14 +89,14 @@ for (const [label, text] of [["BLOCKING", "BLOCKING: choose a database"], ["RISK
     const messages = [user("go"), tool("exit 0"), tool(text)];
     const r = m.decideRoute({ reason: "continuation", previous: { model: cfg.strong, thinkingLevel: "low" }, messages, config: cfg });
     eq(r.model, cfg.strong, "model stays");
-    eq(r.thinkingLevel, "high", "strong thinking at least high");
+    eq(r.thinkingLevel, "medium", "strong thinking at least medium");
     eq(r.state.consecutiveCleanTools, 0, "clean tools reset");
   });
 }
-await t("continuation keeps fast thinking at least medium after a failure", () => {
+await t("continuation keeps fast thinking at least low after a failure", () => {
   const messages = [user("go"), tool("exit 1")];
-  const r = m.decideRoute({ reason: "continuation", previous: { model: cfg.fast, thinkingLevel: "low" }, messages, config: cfg });
-  eq(r.thinkingLevel, "medium", "fast thinking at least medium");
+  const r = m.decideRoute({ reason: "continuation", previous: { model: cfg.fast, thinkingLevel: "off" }, messages, config: cfg });
+  eq(r.thinkingLevel, "low", "fast thinking at least low");
 });
 
 await t("retry fails strong over to fast medium on an overload error", () => {
@@ -122,52 +122,52 @@ await t("isOverloadError matches the documented family only", () => {
 await t("soft budget steps a standard turn down one notch", () => {
   const r = m.decideRoute({ reason: "user", tier: "standard", messages: [user("implement the helper")], usage: { cost: 2, contextPct: 0.2 }, config: cfg });
   eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "low", "thinking");
+  eq(r.thinkingLevel, "off", "thinking");
 });
 await t("context pressure steps a standard turn down one notch", () => {
   const r = m.decideRoute({ reason: "user", tier: "standard", messages: [user("implement the helper")], usage: { cost: 0.2, contextPct: 0.8 }, config: cfg });
   eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "low", "thinking");
+  eq(r.thinkingLevel, "off", "thinking");
 });
 await t("soft budget leaves a deep turn alone", () => {
   const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], usage: { cost: 2, contextPct: 0.2 }, config: cfg });
   eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "high", "thinking");
-});
-await await t("soft budget caps a deep xhigh turn at high", () => {
-  const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], virtualLevel: "high", usage: { cost: 2, contextPct: 0.2 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "high", "thinking");
-});
-await t("context pressure caps a deep xhigh turn at high", () => {
-  const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], virtualLevel: "high", usage: { cost: 0.2, contextPct: 0.8 }, config: cfg });
-  eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "high", "thinking");
-});
-await t("hard budget demotes standard to fast:medium", () => {
-  const r = m.decideRoute({ reason: "user", tier: "standard", messages: [user("implement the helper")], usage: { cost: 5, contextPct: 0.2 }, config: cfg });
-  eq(r.model, cfg.fast, "model");
   eq(r.thinkingLevel, "medium", "thinking");
 });
-await t("hard budget demotes routine to fast:low", () => {
-  const r = m.decideRoute({ reason: "user", tier: "routine", messages: [user("status")], usage: { cost: 5, contextPct: 0.2 }, config: cfg });
+await t("soft budget caps a deep high turn at medium", () => {
+  const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], virtualLevel: "high", usage: { cost: 2, contextPct: 0.2 }, config: cfg });
+  eq(r.model, cfg.strong, "model");
+  eq(r.thinkingLevel, "medium", "thinking");
+});
+await t("context pressure caps a deep high turn at medium", () => {
+  const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], virtualLevel: "high", usage: { cost: 0.2, contextPct: 0.8 }, config: cfg });
+  eq(r.model, cfg.strong, "model");
+  eq(r.thinkingLevel, "medium", "thinking");
+});
+await t("hard budget demotes standard to fast:low", () => {
+  const r = m.decideRoute({ reason: "user", tier: "standard", messages: [user("implement the helper")], usage: { cost: 5, contextPct: 0.2 }, config: cfg });
   eq(r.model, cfg.fast, "model");
   eq(r.thinkingLevel, "low", "thinking");
+});
+await t("hard budget demotes routine to fast:off", () => {
+  const r = m.decideRoute({ reason: "user", tier: "routine", messages: [user("status")], usage: { cost: 5, contextPct: 0.2 }, config: cfg });
+  eq(r.model, cfg.fast, "model");
+  eq(r.thinkingLevel, "off", "thinking");
 });
 await t("hard budget preserves strong for deep turns", () => {
   const r = m.decideRoute({ reason: "user", tier: "deep", messages: [user("security review")], virtualLevel: "high", usage: { cost: 5, contextPct: 0.2 }, config: cfg });
   eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "medium", "thinking");
+  eq(r.thinkingLevel, "low", "thinking");
 });
 await t("cache hysteresis keeps strong for a borderline standard turn with large context", () => {
   const r = m.decideRoute({ reason: "user", tier: "standard", previous: prevStrongHigh, messages: [user("implement the helper")], usage: { cost: 5, contextPct: 0.25, contextTokens: 50000 }, config: cfg });
   eq(r.model, cfg.strong, "model");
-  eq(r.thinkingLevel, "medium", "thinking");
+  eq(r.thinkingLevel, "low", "thinking");
 });
 await t("cache hysteresis does not keep strong for a clear routine turn", () => {
   const r = m.decideRoute({ reason: "user", tier: "routine", previous: prevStrongHigh, messages: [user("status")], usage: { cost: 5, contextPct: 0.25, contextTokens: 50000 }, config: cfg });
   eq(r.model, cfg.fast, "model");
-  eq(r.thinkingLevel, "low", "thinking");
+  eq(r.thinkingLevel, "off", "thinking");
 });
 
 await t("summarizeUsage sums cost and tokens, cache hit and context percent", () => {

@@ -19,25 +19,54 @@ const DEFAULT_SOFT_BUDGET = 1.5;
 const DEFAULT_HARD_BUDGET = 4.0;
 const DEFAULT_CTX_PRESSURE = 0.7;
 
+// One profile per model family. The orchestrator picks a profile (orchestra/<family>-auto) and the router
+// dispatches each turn to that family's strong/fast pair. Budgets and context pressure are shared: they are
+// session economics, not model-family properties.
+const PROFILE_DEFAULTS = {
+  ds: { strong: DEFAULT_STRONG, fast: DEFAULT_FAST, tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high", "xhigh"] },
+  gemini: { strong: "antigravity/gemini-4-carbon", fast: "antigravity/gemini-4-hydrogen", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
+  claude: { strong: "antigravity/claude-opus-5-5", fast: "antigravity/claude-sonnet-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
+  // Single-model profile for orchestra workers: every tier runs on Flash. Flash has no "medium" thinking tier
+  // (its catalog map is off/low/high), so "deep" maps straight to "high" — thinking is the only knob.
+  flash: { strong: DEFAULT_FAST, fast: DEFAULT_FAST, tiers: { routine: "off", standard: "low", deep: "high" }, levels: ["off", "low", "high"] },
+};
+// Virtual-model id -> profile key. "auto" is the legacy id and stays the DeepSeek profile so existing
+// ORCHESTRA_ROUTER_STRONG/FAST pins keep their meaning; "flash-auto" is the worker profile (always Flash).
+const PROFILE_BY_ID = {
+  auto: "ds",
+  "ds-auto": "ds",
+  "gemini-auto": "gemini",
+  "claude-auto": "claude",
+  "flash-auto": "flash",
+};
+
 const LEVELS = ["off", "low", "medium", "high", "xhigh"];
 const TIERS = ["routine", "standard", "deep"];
 const FAILURE_MARKERS = /BLOCKING|RISK NOTES|OUTSIDE PATHS|\bFAIL\b/;
 const NONZERO_EXIT = /\bexit(?:\s+code)?\s*[:=]?\s*[1-9]\d*\b/i;
 
-/** Read the router's optional configuration. All values have safe defaults. */
-export function readRouterConfig(env = process.env) {
+/**
+ * Read the router's optional configuration for one profile. All values have safe defaults. The ds profile reads
+ * the legacy ORCHESTRA_ROUTER_STRONG/FAST vars; the others read ORCHESTRA_ROUTER_<PROFILE>_STRONG/FAST.
+ */
+export function readRouterConfig(env = process.env, profile = "ds") {
   const number = (name, fallback) => {
     const raw = env[name];
     const n = raw == null || raw === "" ? NaN : Number(raw);
     return Number.isFinite(n) && n >= 0 ? n : fallback;
   };
+  const defs = PROFILE_DEFAULTS[profile] || PROFILE_DEFAULTS.ds;
+  const prefix = profile === "ds" ? "ORCHESTRA_ROUTER" : `ORCHESTRA_ROUTER_${profile.toUpperCase()}`;
   return {
-    strong: env.ORCHESTRA_ROUTER_STRONG || DEFAULT_STRONG,
-    fast: env.ORCHESTRA_ROUTER_FAST || DEFAULT_FAST,
+    profile,
+    strong: env[`${prefix}_STRONG`] || defs.strong,
+    fast: env[`${prefix}_FAST`] || defs.fast,
     classifier: env.ORCHESTRA_ROUTER_CLASSIFIER || "",
     softBudget: number("ORCHESTRA_ROUTER_SOFT_BUDGET", DEFAULT_SOFT_BUDGET),
     hardBudget: number("ORCHESTRA_ROUTER_HARD_BUDGET", DEFAULT_HARD_BUDGET),
     ctxPressure: number("ORCHESTRA_ROUTER_CTX_PRESSURE", DEFAULT_CTX_PRESSURE),
+    tiers: defs.tiers,
+    levels: defs.levels,
   };
 }
 
@@ -50,6 +79,18 @@ export function stepThinkingDown(level, steps = 1) {
 
 function atLeast(level, minimum) {
   return LEVELS.indexOf(level) >= LEVELS.indexOf(minimum) ? level : minimum;
+}
+
+/** Clamp a level to the nearest level a profile's physical models offer (frugal: never raise the request). */
+export function clampLevel(level, levels) {
+  const list = Array.isArray(levels) && levels.length ? levels : LEVELS;
+  if (list.includes(level)) return level;
+  let best = list[0];
+  for (const l of list) {
+    if (LEVELS.indexOf(l) <= LEVELS.indexOf(level)) best = l;
+    else break;
+  }
+  return best;
 }
 
 function num(value) {
@@ -278,13 +319,18 @@ export async function chooseTier(options = {}) {
   return { tier, classifierUsed: null, reason: "deterministic fallback" };
 }
 
+// Frugal by default: reasoning is a cost, so spend it only where it pays. Each profile's `tiers` map gives the
+// thinking level for routine/standard/deep work; the flash profile (workers) has no medium tier, so its deep maps
+// straight to high. An explicit high virtual level still escalates a deep turn one notch where the profile allows.
 function baseRoute(tier, config, virtualLevel) {
   if (tier === "direct") return { model: config.fast, thinkingLevel: "off" };
-  if (tier === "routine") return { model: config.fast, thinkingLevel: "low" };
-  if (tier === "deep") {
-    return { model: config.strong, thinkingLevel: virtualLevel === "high" ? "xhigh" : "high" };
+  const tiers = (config && config.tiers) || { routine: "off", standard: "low", deep: "medium" };
+  const level = tiers[tier] || tiers.standard || "low";
+  const model = tier === "routine" ? config.fast : config.strong;
+  if (tier === "deep" && virtualLevel === "high" && level === "medium") {
+    return { model, thinkingLevel: "high" };
   }
-  return { model: config.strong, thinkingLevel: "medium" };
+  return { model, thinkingLevel: level };
 }
 
 function emptyState() {
@@ -373,10 +419,11 @@ export function decideRoute(request = {}) {
     let lastReason;
 
     if (failure) {
-      const minimum = sticky === config.strong ? "high" : "medium";
+      const tiers = (config && config.tiers) || { standard: "low", deep: "medium" };
+      const minimum = sticky === config.strong ? tiers.deep : tiers.standard;
       thinkingLevel = atLeast(thinkingLevel, minimum);
       lastReason = `tool result needs attention: keep thinking at least ${minimum}`;
-    } else if (clean >= 3) {
+    } else if (clean >= 2) {
       thinkingLevel = stepThinkingDown(thinkingLevel);
       lastReason = `${clean} clean tool results: step thinking down to ${thinkingLevel}, same model`;
     } else {
@@ -441,26 +488,26 @@ export function decideRoute(request = {}) {
   if (sessionCost >= config.hardBudget) {
     if (tier === "deep") {
       model = config.strong;
-      thinkingLevel = "medium";
-      lastReason += `; hard budget: strong reserved for deep turns, thinking medium`;
+      thinkingLevel = "low";
+      lastReason += `; hard budget: strong reserved for deep turns, thinking low`;
     } else if (tier === "standard" && prevStrong && contextTokens > 40000) {
       // Cache hysteresis: a strong prompt cache is worth more than the one-turn saving.
       model = config.strong;
-      thinkingLevel = "medium";
+      thinkingLevel = "low";
       lastReason += `; hard budget: cache hysteresis keeps strong while context is large`;
     } else {
       model = config.fast;
-      thinkingLevel = tier === "standard" ? "medium" : "low";
+      thinkingLevel = tier === "standard" ? "low" : "off";
       lastReason += `; hard budget: routine/standard on the fast model (${thinkingLevel})`;
     }
   } else if (sessionCost >= config.softBudget || contextPct >= config.ctxPressure) {
     const pressureByContext = contextPct >= config.ctxPressure;
     const why = pressureByContext ? "context pressure" : "soft budget";
     if (tier === "deep") {
-      // Deep turns are critical: pressure only removes the optional xhigh posture, never the high floor.
-      if (thinkingLevel === "xhigh") {
-        thinkingLevel = "high";
-        lastReason += `; ${why}: deep capped at high (no xhigh)`;
+      // Frugal: pressure caps deep reasoning at medium; high is only for an explicit high virtual level.
+      if (thinkingLevel === "high") {
+        thinkingLevel = "medium";
+        lastReason += `; ${why}: deep capped at medium`;
       }
     } else {
       thinkingLevel = stepThinkingDown(thinkingLevel);
@@ -489,11 +536,10 @@ function modelRef(model) {
   return refOf(model);
 }
 
+/** Resolve a "provider/id" ref to its catalog Model, or null when the provider/model is absent. */
 function resolveModel(ctx, ref) {
   const { provider, id } = splitModel(ref);
-  const found = ctx && ctx.modelRegistry && ctx.modelRegistry.find ? ctx.modelRegistry.find(provider, id) : null;
-  if (!found) throw new Error(`orchestra/auto: physical model ${refOf(ref) || JSON.stringify(ref)} is not in the catalog`);
-  return found;
+  return ctx && ctx.modelRegistry && ctx.modelRegistry.find ? ctx.modelRegistry.find(provider, id) || null : null;
 }
 
 function safeContextUsage(ctx) {
@@ -556,99 +602,118 @@ function stateChanged(previous, next) {
 let lastSnapshot = null;
 
 export default function (pi) {
-  const config = readRouterConfig();
+  for (const [id, profileKey] of Object.entries(PROFILE_BY_ID)) {
+    const config = readRouterConfig(process.env, profileKey);
 
-  pi.registerVirtualModel({
-    provider: "orchestra",
-    id: "auto",
-    name: "Orchestra Auto",
-    thinkingLevels: ["low", "medium", "high"],
-    async route(request, ctx) {
-      const messages = Array.isArray(request.messages) ? request.messages : [];
-      const contextUsage = safeContextUsage(ctx);
-      const usage = summarizeUsage(messages, contextUsage);
-      const reason = request.reason || "user";
-      const virtualLevel = request.thinkingLevel || "medium";
+    pi.registerVirtualModel({
+      provider: "orchestra",
+      id,
+      name: id === "auto" ? "Orchestra Auto" : `Orchestra Auto (${profileKey})`,
+      thinkingLevels: ["low", "medium", "high"],
+      async route(request, ctx) {
+        const messages = Array.isArray(request.messages) ? request.messages : [];
+        const contextUsage = safeContextUsage(ctx);
+        const usage = summarizeUsage(messages, contextUsage);
+        const reason = request.reason || "user";
+        const virtualLevel = request.thinkingLevel || "medium";
 
-      let tier;
-      let classifierUsed = null;
-      let tierReason = "";
-      let classifierLabel = null;
-      if (reason === "user") {
-        const classifier = await findClassifier(ctx, config);
-        let classify;
-        if (classifier) {
-          classifierLabel = classifier.ref;
-          classify = async ({ prompt, lastTool }) => {
-            const result = await ctx.modelRegistry.classify(
-              classifier.model,
-              {
-                state: { prompt, lastTool },
-                questions: {
-                  tier: {
-                    type: "choice",
-                    instructions:
-                      "Pick the routing tier for this software-engineering turn. Routine is mechanical; " +
-                      "standard needs ordinary judgment; deep needs architecture, security, data, network, " +
-                      "migration, incident, or review-blocker judgment.",
-                    criteria: {
-                      routine: "Status, listing, formatting, linting, cleanup, or a trivial confirmation",
-                      standard: "An ordinary implementation, small fix, or straightforward review",
-                      deep: "Architecture, design, security, auth, schema, migration, database, network, infra, rollback, incident, hard debugging, or a blocking review",
+        let tier;
+        let classifierUsed = null;
+        let tierReason = "";
+        let classifierLabel = null;
+        if (reason === "user") {
+          const classifier = await findClassifier(ctx, config);
+          let classify;
+          if (classifier) {
+            classifierLabel = classifier.ref;
+            classify = async ({ prompt, lastTool }) => {
+              const result = await ctx.modelRegistry.classify(
+                classifier.model,
+                {
+                  state: { prompt, lastTool },
+                  questions: {
+                    tier: {
+                      type: "choice",
+                      instructions:
+                        "Pick the routing tier for this software-engineering turn. Routine is mechanical; " +
+                        "standard needs ordinary judgment; deep needs architecture, security, data, network, " +
+                        "migration, incident, or review-blocker judgment.",
+                      criteria: {
+                        routine: "Status, listing, formatting, linting, cleanup, or a trivial confirmation",
+                        standard: "An ordinary implementation, small fix, or straightforward review",
+                        deep: "Architecture, design, security, auth, schema, migration, database, network, infra, rollback, incident, hard debugging, or a blocking review",
+                      },
                     },
                   },
                 },
-              },
-              request.signal ? { signal: request.signal } : undefined,
-            );
-            const answer = result && result.stopReason === "stop" ? result.answers && result.answers.tier : null;
-            return answer && answer.type === "choice" ? answer.choice : undefined;
-          };
+                request.signal ? { signal: request.signal } : undefined,
+              );
+              const answer = result && result.stopReason === "stop" ? result.answers && result.answers.tier : null;
+              return answer && answer.type === "choice" ? answer.choice : undefined;
+            };
+          }
+          const choice = await chooseTier({
+            userText: lastUserText(messages),
+            lastToolText: lastToolText(messages),
+            lastToolSummary: toolSummary(messages),
+            virtualLevel,
+            classify,
+            classifierRef: classifierLabel,
+          });
+          tier = choice.tier;
+          classifierUsed = choice.classifierUsed;
+          tierReason = choice.classifierUsed ? "classifier-chosen tier" : choice.reason;
         }
-        const choice = await chooseTier({
-          userText: lastUserText(messages),
-          lastToolText: lastToolText(messages),
-          lastToolSummary: toolSummary(messages),
+
+        const decision = decideRoute({
+          reason,
+          messages,
+          previous: request.previous,
+          failed: request.failed,
+          thinkingLevel: virtualLevel,
           virtualLevel,
-          classify,
-          classifierRef: classifierLabel,
+          tier,
+          tierReason,
+          classifierUsed,
+          usage,
+          state: request.state,
+          config,
         });
-        tier = choice.tier;
-        classifierUsed = choice.classifierUsed;
-        tierReason = choice.classifierUsed ? "classifier-chosen tier" : choice.reason;
-      }
 
-      const decision = decideRoute({
-        reason,
-        messages,
-        previous: request.previous,
-        failed: request.failed,
-        thinkingLevel: virtualLevel,
-        virtualLevel,
-        tier,
-        tierReason,
-        classifierUsed,
-        usage,
-        state: request.state,
-        config,
-      });
+        // Clamp to what this profile's physical models actually offer (the flash profile has no medium tier).
+        const thinkingLevel = clampLevel(decision.thinkingLevel, config.levels);
 
-      const model = resolveModel(ctx, decision.model);
-      lastSnapshot = {
-        model: decision.model,
-        thinkingLevel: decision.thinkingLevel,
-        reason: decision.state && decision.state.lastReason,
-        tier: decision.state && decision.state.tier,
-        usage,
-        classifier: decision.state && decision.state.classifierUsed ? classifierLabel || "classifier" : null,
-        config,
-      };
+        // Resolve the chosen model; fall back to the other model in the pair when the provider is absent rather
+        // than failing the turn. Only when neither resolves does routing error out.
+        let model = resolveModel(ctx, decision.model);
+        let fallback = null;
+        if (!model) {
+          const alternate = decision.model === config.strong ? config.fast : config.strong;
+          fallback = { from: decision.model, to: alternate };
+          model = resolveModel(ctx, alternate);
+          if (!model) {
+            throw new Error(`orchestra/${id}: neither ${decision.model} nor ${alternate} is in the catalog`);
+          }
+        }
 
-      const result = { model, thinkingLevel: decision.thinkingLevel };
-      if (reason !== "direct" && decision.state && stateChanged(request.state, decision.state)) result.state = decision.state;
-      return result;
-    },
-  });
+        lastSnapshot = {
+          profile: config.profile,
+          model: decision.model,
+          thinkingLevel,
+          reason: decision.state && decision.state.lastReason,
+          tier: decision.state && decision.state.tier,
+          usage,
+          classifier: decision.state && decision.state.classifierUsed ? classifierLabel || "classifier" : null,
+          config,
+          fallback,
+        };
+
+        const result = { model, thinkingLevel };
+        if (reason !== "direct" && decision.state && stateChanged(request.state, decision.state)) result.state = decision.state;
+        return result;
+      },
+    });
+  }
 
   pi.registerCommand("router", {
     description: "Show the last orchestra/auto route, spend, context, cache and classifier",
@@ -660,11 +725,12 @@ export default function (pi) {
       const s = lastSnapshot;
       const money = (n) => `$${num(n).toFixed(2)}`;
       const pct = (n) => `${Math.round(num(n) * 100)}%`;
+      const fallbackText = s.fallback ? ` · fallback ${s.fallback.from} → ${s.fallback.to}` : "";
       const text =
-        `router: ${s.model}:${s.thinkingLevel} (${s.tier || "?"}) · ${s.reason || "no reason recorded"} · ` +
+        `router: [${s.profile || "?"}] ${s.model}:${s.thinkingLevel} (${s.tier || "?"}) · ${s.reason || "no reason recorded"} · ` +
         `spend ${money(s.usage.cost)} vs soft ${money(s.config.softBudget)} / hard ${money(s.config.hardBudget)} · ` +
         `context ${pct(s.usage.contextPct)} · cache hit ${Math.round(num(s.usage.cacheHitPct))}% · ` +
-        `classifier ${s.classifier || "deterministic fallback"}`;
+        `classifier ${s.classifier || "deterministic fallback"}` + fallbackText;
       if (ctx && ctx.ui) ctx.ui.notify(text, "info");
     },
   });
