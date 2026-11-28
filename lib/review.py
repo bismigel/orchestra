@@ -104,7 +104,7 @@ def changed_files(worktree, base):
     os.close(tmp_fd)
     try:
         if index_path and os.path.exists(index_path):
-            shutil.copyfile(index_path, tmp_path)
+            shutil.copy2(index_path, tmp_path)  # keep the mtime: git needs it to spot racily clean entries
         env = dict(os.environ, GIT_INDEX_FILE=tmp_path)
         subprocess.run(["git", "-C", worktree, "add", "-A"], env=env,
                        capture_output=True, text=True, check=False)

@@ -1326,10 +1326,12 @@ task_setup() {
 }
 
 # work_tree <wt>: the git tree hash of everything in the worktree (tracked and untracked, not ignored), without
-# touching the real index. Any change to the code changes it, which is what makes a proof stale.
+# touching the real index. The copy keeps the index mtime (cp -p): git compares it with file mtimes to re-hash racily
+# clean entries, and a fresh mtime would hide an edit made in the same second as the last index write. Any change to
+# the code changes the hash, which is what makes a proof stale.
 work_tree() {
   local wt=$1 idx; idx=$(mktemp)
-  cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
+  cp -p "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
   GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1
   GIT_INDEX_FILE=$idx git -C "$wt" write-tree; rm -f "$idx"
 }
@@ -1436,7 +1438,7 @@ cmd_diff() {
     return 0
   fi
   local mb; mb=$(git -C "$wt" merge-base HEAD "$ORCHESTRA_BASE" 2>/dev/null) || die "no merge base with $ORCHESTRA_BASE (fetch first?)"
-  local idx; idx=$(mktemp); cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx"
+  local idx; idx=$(mktemp); cp -p "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx"
   GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1
   local -a ex=(); local g; for g in $ORCHESTRA_GENERATED; do ex+=(":(exclude,glob)**/$g"); done
   GIT_INDEX_FILE=$idx git -C "$wt" --no-pager diff --cached --stat=120 "$mb" -- . ':(exclude).orchestra'

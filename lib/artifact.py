@@ -236,7 +236,7 @@ def read_diff(worktree, base):
     os.close(tmp_fd)
     try:
         if index_path and os.path.exists(index_path):
-            shutil.copyfile(index_path, tmp_path)
+            shutil.copy2(index_path, tmp_path)  # keep the mtime: git needs it to spot racily clean entries
         env = dict(os.environ, GIT_INDEX_FILE=tmp_path)
         ref = index_path_for(worktree, base)
         if not ref:
