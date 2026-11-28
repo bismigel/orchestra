@@ -9,3 +9,8 @@ Spec gaps found in review, one line each: what the spec missed, and the rule tha
 - 2026-11-25 T2: the worktree was made before a related PR merged, so `review` listed that PR's files as "outside
   paths" (the diff against the newer base shows them reversed). Rule: before reading OUTSIDE PATHS, check whether the
   base moved since the worktree was made; if it did, those entries are the base's changes, not the worker's.
+- 2026-11-28 T4: Owns/Touches entries without backticks are not parsed as paths, so review flagged every owned file as
+  outside the paths. Rule: write each Owns/Touches entry as a backticked path (`bin/orchestra-worker`).
+- 2026-11-28 T4: a new check in front of `run` (pre-run lint) broke another suite whose fixture specs are minimal on
+  purpose (tests/freshness.sh). Rule: a task that adds a gate to a command lists in Touches every suite that calls that
+  command with a fixture spec (`grep -l 'run .*--spec' tests/*.sh`), and says how each should pass.
