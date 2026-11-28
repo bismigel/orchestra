@@ -1,6 +1,10 @@
 # Changelog
 
 ## 0.8.0 (unreleased)
+- **Optional herdr support** (`ORCHESTRA_HERDR=auto|notify|off`, default `auto`). Inside a herdr pane, `run` and
+`scout` open a sibling pane with `orchestra-worker watch <task>` that closes itself when the run ends, and show a
+notification with the exit. Outside herdr nothing changes; herdr output never reaches orchestra-worker's output and
+a herdr failure never changes an exit code. `doctor` reports whether it is active.
 - **Fewer skills.** `orchestra-land` is folded into the `orchestra` skill and the orchestrator guide's Landing section
 (`guide orchestrator --section landing`), and `orchestra-refine` into `orchestra-plan` (refine stays documented in
 `guide planning --section refine`). `install.sh` installs `orchestra` and `orchestra-plan` (plus the two ops skills

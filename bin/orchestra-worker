@@ -118,6 +118,8 @@ load_config() {
   ORCHESTRA_JEV_TIMEOUT=${ORCHESTRA_JEV_TIMEOUT:-20}
   ORCHESTRA_JEV_REDACT=${ORCHESTRA_JEV_REDACT:-}                # extra regex to remove from what Jev sees
   case "$ORCHESTRA_JEV" in off|shadow|advise) ;; *) die "ORCHESTRA_JEV must be off, shadow or advise (got '$ORCHESTRA_JEV')" ;; esac
+  ORCHESTRA_HERDR=${ORCHESTRA_HERDR:-auto}                     # auto | notify | off: herdr watch pane and notification
+  case "$ORCHESTRA_HERDR" in auto|notify|off) ;; *) die "ORCHESTRA_HERDR must be auto, notify or off (got '$ORCHESTRA_HERDR')" ;; esac
   ORCHESTRA_GENERATED=${ORCHESTRA_GENERATED:-*_templ.go *.pb.go *_gen.go *.gen.go *.min.js *.min.css go.sum package-lock.json yarn.lock pnpm-lock.yaml Cargo.lock poetry.lock uv.lock}
   [ "${ORCHESTRA_NEEDS_MODEL:-1}" = 0 ] && return 0
   [ -n "$ORCHESTRA_MODEL" ] || die "set ORCHESTRA_MODEL (provider/model, e.g. deepseek/deepseek-flash) in config.env"
@@ -310,6 +312,7 @@ print(t)' "$tpl")
   local progress; progress=$(progress_script "$harness_file")
   check_budget_setup "$progress"
   write_run_state "$state" "$task" "$n" "$wt" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress"
+  herdr_watch_pane "$here" "$repo" "$task"
   # The state file outlives this process on every exit path, so it is removed on all of them: normal, timeout
   # (rc 124) and SIGINT. The path is baked into the trap: the trap runs after this function's locals are out of
   # scope, where "$state" would be unbound (set -u) and would abort the run.
@@ -334,6 +337,7 @@ print(t)' "$tpl")
   python3 -I -c 'import json,sys,time; json.dump({"exit":int(sys.argv[2]),"secs":int(sys.argv[3]),"finished_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())},open(sys.argv[1],"w"))' \
     "$out.result.json" "$rc" "$secs"
   print_summary "$task" "$state" "$n" "$rc" "$secs"
+  herdr_notify_end "$task" "$rc" run
   git -C "$wt" status --short | grep -v '^?? \.orchestra/' | head -15 >&2 || true
   return "$rc"
 }
@@ -1049,6 +1053,10 @@ cmd_doctor() {
   local stale; stale=$(cmd_status "$here" --json 2>/dev/null | python3 -I -c 'import json,sys; print(sum(1 for r in json.load(sys.stdin)["runs"] if r["state"] == "stale"))' 2>/dev/null || echo 0)
   [ "${stale:-0}" = 0 ] || warn_ "$stale stale run state file(s): orchestra-worker status --prune"
   [ -d "$base_dir" ] && echo "info  worktrees: $base_dir"
+  if [ "$ORCHESTRA_HERDR" = off ]; then echo "info  herdr: off"
+  elif herdr_on; then echo "info  herdr: in a herdr pane (ORCHESTRA_HERDR=$ORCHESTRA_HERDR)"
+  elif [ "${HERDR_ENV:-}" = 1 ]; then warn_ "herdr: HERDR_ENV=1 but herdr is not on PATH"
+  else echo "info  herdr: not in a herdr pane (optional)"; fi
   echo "--- $nfail failed, $nwarn warning(s)"
   [ "$nfail" = 0 ]
 }
@@ -1268,6 +1276,7 @@ print(t)' "$here/prompts/scout.md")
   check_budget_setup "$progress"
   guard_running "$state" "scout $task"
   write_run_state "$state" "$task" "$n" "$repo" "$ORCHESTRA_MODEL" "$ORCHESTRA_HARNESS" "$out.jsonl" "$progress" scout
+  herdr_watch_pane "$here" "$repo" "$task"
   # shellcheck disable=SC2064  # expanded now on purpose: $state is out of scope when the trap runs
   trap "rm -f $(printf '%q' "$state/run.json"); egress_stop" EXIT
   egress_start "$out.egress.log"
@@ -1275,20 +1284,66 @@ print(t)' "$here/prompts/scout.md")
   launch_worker "scout:$task" "$out" "$progress" "${ORCHESTRA_SCOUT_TIMEOUT:-15m}"; rc=$LAUNCH_RC
   unset key
   egress_stop
-  [ "$rc" != 5 ] || { log "scout stopped: over budget (ORCHESTRA_MAX_COST)"; return 5; }
+  [ "$rc" != 5 ] || { herdr_notify_end "$task" "$rc" scout; log "scout stopped: over budget (ORCHESTRA_MAX_COST)"; return 5; }
   local used m bad=""; used=$(harness_models_used "$out.jsonl")
   for m in $used; do model_allowed "$m" || bad="$bad $m"; done
   harness_usage "$out.jsonl" > "$out.usage.json" || echo '{}' > "$out.usage.json"
-  [ -z "$bad" ] || { log "MODEL POLICY: model(s) not allowed answered:$bad"; return 3; }
-  [ -s "$state/home/scout.json" ] || { log "scout wrote no scout.json (exit $rc; see $out.err)"; return 4; }
+  [ -z "$bad" ] || { herdr_notify_end "$task" 3 scout; log "MODEL POLICY: model(s) not allowed answered:$bad"; return 3; }
+  [ -s "$state/home/scout.json" ] || { herdr_notify_end "$task" 4 scout; log "scout wrote no scout.json (exit $rc; see $out.err)"; return 4; }
   cp "$state/home/scout.json" "$state/scout.json"
   if [ -s "$state/home/state.md" ]; then
     cp "$state/home/state.md" "$state/state.md"
     echo "state snapshot: $state/state.md"
   fi
-  python3 -I "$here/lib/scout_view.py" "$state/scout.json" "$task" "$out.usage.json" || return 4
+  python3 -I "$here/lib/scout_view.py" "$state/scout.json" "$task" "$out.usage.json" || { herdr_notify_end "$task" 4 scout; return 4; }
   echo "full scout report: $state/scout.json"
+  herdr_notify_end "$task" "$rc" scout
   return "$rc"
+}
+
+# ---- herdr (optional): a live watch pane and a notification per run -----------------------------------------------
+
+# herdr_on: true only when herdr is wanted (ORCHESTRA_HERDR is not off), we are inside a herdr pane (HERDR_ENV=1),
+# and the herdr binary is on PATH. Outside herdr, or without herdr, every helper below is a no-op.
+herdr_on() {
+  [ "${ORCHESTRA_HERDR:-auto}" != off ] || return 1
+  [ "${HERDR_ENV:-}" = 1 ] || return 1
+  command -v herdr >/dev/null 2>&1
+}
+
+# herdr_watch_pane <here> <repo> <task>: open a small sibling pane that follows the run with `watch <task>`, then
+# closes itself (`; exit`). Only ORCHESTRA_HERDR=auto. Every herdr call is bounded and its failure ignored.
+herdr_watch_pane() {
+  local here=$1 repo=$2 task=$3
+  [ "${ORCHESTRA_HERDR:-auto}" = auto ] || return 0
+  herdr_on || return 0
+  local out id
+  out=$(timeout 5 herdr pane split --current --direction down --ratio 0.3 --cwd "$repo" --no-focus 2>/dev/null) || true
+  id=$(printf '%s' "$out" | python3 -I -c 'import json,sys
+
+try: print(json.load(sys.stdin)["result"]["pane"]["pane_id"])
+except Exception: pass' 2>/dev/null) || true
+  [ -n "$id" ] || return 0
+  local worker cmd
+  worker=$(printf '%q' "$here/bin/orchestra-worker")
+  cmd="$worker watch $(printf '%q' "$task"); exit"
+  timeout 5 herdr pane run "$id" "$cmd" >/dev/null 2>&1 || true
+  return 0
+}
+
+# herdr_notify_end <task> <rc> <kind>: one notification when a run or a scout ends (auto and notify). A done sound
+# on success, a request sound otherwise. Failure is ignored: herdr never changes an exit code.
+herdr_notify_end() {
+  local task=$1 rc=$2 kind=$3 sound body
+  herdr_on || return 0
+  if [ "$rc" = 0 ]; then
+    sound='done'
+  else
+    sound='request'
+  fi
+  if [ "$kind" = scout ]; then body="next: read the scout view"; else body="next: orchestra-worker review $task"; fi
+  timeout 5 herdr notification show "orchestra $kind $task: exit $rc" --body "$body" --sound "$sound" >/dev/null 2>&1 || true
+  return 0
 }
 
 # ---- review and landing: diff, prove, land (no model involved) ----------------------------------------------------
