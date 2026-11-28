@@ -9,11 +9,16 @@ description: Orchestrate cheap worker agents (orchestra-worker) on well-specifie
 printed), model, base, gate and dev environment, and says what to fix.
 
 You are the orchestrator. Workers are cheap models running `orchestra-worker` in a sandbox. Follow the full guide
-printed by `orchestra-worker guide orchestrator`; the essentials:
+printed by `orchestra-worker guide orchestrator --cat` (prints the text: never `read` a guide path outside the
+workspace); the essentials:
 
 1. **Classify** the task: `worker` (spec settles everything) · `split` (you write the judgment-heavy rules and the
    required test rows first, or the core itself) · `orchestrator` (do it yourself). Data handling, privacy, auth,
-   money, contracts, schema and security are never left to a worker's judgment.
+   money, contracts, schema and security are never left to a worker's judgment. A multi-file refactor in such an
+   area is still `split`: settle the invariants and test rows, then delegate the edits. Several native edits in a
+   row on source files is the sign you skipped the spec.
+   Before a run, `orchestra-task lint <id> --strict`; `run` refuses a spec that fails it. If the worktree command
+   would push a claim branch you may not push, use `run --local-worktree`, never a hand-made `git worktree add`.
 2. **Spec** it: goal, allowed paths, the decisions, acceptance the worker can run (tests, not screenshots),
    out of scope. Write the risky test rows yourself, including negatives (what must not change). For anything
    beyond a few files, **scout the draft first**: `orchestra-worker scout <id> --spec <draft>` (read-only worker,

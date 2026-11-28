@@ -25,6 +25,13 @@ Classify every task before delegating it:
 - **orchestrator**: judgment end to end (architecture, pricing, incident fixes, anything you would not let a junior
   merge unreviewed). Not delegated.
 
+A sensitive area does not make a task `orchestrator`. A refactor that touches auth, sessions or headers across many
+files is `split`: the orchestrator diagnoses, writes the invariants as a state table with the risky test rows (or
+writes a minimal core itself), lints and scouts the spec, and delegates the multi-file edits, call sites, generated
+code and test iteration. `orchestrator` is for work whose judgment is in every line, not for mechanical edits that
+happen to sit inside a sensitive module. If you find yourself making the fourth native edit in a row, stop and write
+the spec.
+
 A worker that meets an undecided judgment call stops and lists it under `open_questions`. That is a success, not a
 failure: it means the spec missed something and the orchestrator should decide it.
 

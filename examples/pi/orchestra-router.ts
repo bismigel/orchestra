@@ -50,6 +50,10 @@ const PROFILE_BY_ID = {
 
 const LEVELS = ["off", "low", "medium", "high", "xhigh"];
 const TIERS = ["routine", "standard", "deep"];
+// Providers that run the model's tool loop themselves (Claude Code behind pi-claude-bridge, agy behind the Antigravity
+// bridge): pi's first request of a user turn starts one closed loop, and the tool steps after it never reach the
+// provider as new requests with their own thinking level. On those, only the user-turn level takes effect.
+const DEFAULT_CLOSED_LOOP = "claude-bridge,antigravity";
 const FAILURE_MARKERS = /BLOCKING|RISK NOTES|OUTSIDE PATHS|\bFAIL\b/;
 const NONZERO_EXIT = /\bexit(?:\s+code)?\s*[:=]?\s*[1-9]\d*\b/i;
 
@@ -68,9 +72,11 @@ export function readRouterConfig(env = process.env, profile = "ds", defs = null)
   const fixed = defs && defs.model ? defs : null;
   if (!fixed) defs = PROFILE_DEFAULTS[profile] || PROFILE_DEFAULTS.ds;
   const prefix = profile === "ds" ? "ORCHESTRA_ROUTER" : `ORCHESTRA_ROUTER_${profile.toUpperCase()}`;
+  const model = fixed ? fixed.model : env[`${prefix}_MODEL`] || env[`${prefix}_STRONG`] || defs.model;
   return {
     profile,
-    model: fixed ? fixed.model : env[`${prefix}_MODEL`] || env[`${prefix}_STRONG`] || defs.model,
+    model,
+    closedLoop: isClosedLoop(model, env),
     classifier: env.ORCHESTRA_ROUTER_CLASSIFIER || "",
     softBudget: number("ORCHESTRA_ROUTER_SOFT_BUDGET", DEFAULT_SOFT_BUDGET),
     hardBudget: number("ORCHESTRA_ROUTER_HARD_BUDGET", DEFAULT_HARD_BUDGET),
@@ -78,6 +84,38 @@ export function readRouterConfig(env = process.env, profile = "ds", defs = null)
     tiers: defs.tiers,
     levels: defs.levels,
   };
+}
+
+/**
+ * Whether a model's provider runs its own tool loop, so a thinking level only takes effect at the start of a user
+ * turn. ORCHESTRA_ROUTER_CLOSED_LOOP overrides the provider list (comma separated; "none" for no provider).
+ */
+export function isClosedLoop(ref, env = process.env) {
+  const raw = env.ORCHESTRA_ROUTER_CLOSED_LOOP;
+  const list = (raw == null || raw === "" ? DEFAULT_CLOSED_LOOP : raw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s && s !== "none");
+  const provider = splitModel(ref).provider;
+  return !!provider && list.includes(provider);
+}
+
+/**
+ * The profile config fitted to the physical model's real thinking ladder. A named profile's levels and tiers are
+ * defaults written for a model family; the catalog model may lack some of them (Claude 5.5 has no `off`, DeepSeek V4
+ * Pro only `off` and `high`). Pi would then clamp the level on its own, upward, and the router would report a level
+ * that never ran. Levels become the intersection with what the model offers; when a tier no longer fits, the tiers
+ * are rebuilt on the model's ladder the same way the per-model routers build theirs. A model that does not declare
+ * `reasoning` (a test double) leaves the config unchanged.
+ */
+export function fitConfigToModel(config, model) {
+  if (!model || typeof model !== "object" || model.reasoning === undefined) return config;
+  const offered = supportedLevels(model);
+  const own = Array.isArray(config.levels) && config.levels.length ? config.levels : LEVELS;
+  const both = own.filter((l) => offered.includes(l));
+  const levels = both.length ? both : offered;
+  const tiers = config.tiers && TIERS.every((t) => levels.includes(config.tiers[t])) ? config.tiers : tiersForLevels(levels);
+  return { ...config, levels, tiers };
 }
 
 /** One step down the thinking ladder: xhigh -> high -> medium -> low -> off. */
@@ -428,6 +466,22 @@ export function decideRoute(request = {}) {
     const clean = countConsecutiveCleanTools(messages);
     const failure = hasFailureInLastTool(messages);
     let lastReason;
+
+    if (config.closedLoop) {
+      // The provider runs this turn's tool loop itself: a new level here would be recorded but never sent. Keep the
+      // user-turn level so the session and /router report what the model really runs.
+      const state = {
+        ...stateIn,
+        phase: "continuation",
+        tier: stateIn.tier || "standard",
+        consecutiveCleanTools: failure ? 0 : clean,
+        lastModel: sticky,
+        lastThinking: thinkingLevel,
+        lastReason: `closed loop (${splitModel(sticky).provider}): the user-turn level ${thinkingLevel} holds until the next user message`,
+        classifierUsed: stateIn.classifierUsed,
+      };
+      return { model: sticky, thinkingLevel, state };
+    }
 
     if (failure) {
       const tiers = (config && config.tiers) || { standard: "low", deep: "medium" };
@@ -828,6 +882,14 @@ function registerRouter(pi, { id, name, config, contextWindow, maxTokens }) {
         tierReason = choice.classifierUsed ? "classifier-chosen tier" : choice.reason;
       }
 
+      // Resolve the model first: the levels and tiers come from what it really offers. There is no alternate to fall
+      // back to: a missing model is a setup error.
+      const model = resolveModel(ctx, config.model);
+      if (!model) {
+        throw new Error(`orchestra/${id}: ${config.model} is not in the catalog (provider not loaded or no credentials)`);
+      }
+      const fitted = fitConfigToModel(config, model);
+
       const decision = decideRoute({
         reason,
         messages,
@@ -840,17 +902,13 @@ function registerRouter(pi, { id, name, config, contextWindow, maxTokens }) {
         classifierUsed,
         usage,
         state: request.state,
-        config,
+        config: fitted,
       });
 
-      // Clamp to what this profile's physical models actually offer (the flash profile has no medium tier).
-      const thinkingLevel = clampLevel(decision.thinkingLevel, config.levels);
-
-      // Resolve the chosen model. There is no alternate to fall back to: a missing model is a setup error.
-      const model = resolveModel(ctx, decision.model);
-      if (!model) {
-        throw new Error(`orchestra/${id}: ${decision.model} is not in the catalog (provider not loaded or no credentials)`);
-      }
+      // Clamp to what the physical model offers, frugally (never above the decision), and record the level that is
+      // really sent, so the session state and /router never claim a level the model did not run.
+      const thinkingLevel = clampLevel(decision.thinkingLevel, fitted.levels);
+      if (decision.state) decision.state.lastThinking = thinkingLevel;
 
       lastSnapshot = {
         profile: config.profile,
@@ -860,7 +918,7 @@ function registerRouter(pi, { id, name, config, contextWindow, maxTokens }) {
         tier: decision.state && decision.state.tier,
         usage,
         classifier: decision.state && decision.state.classifierUsed ? classifierLabel || "classifier" : null,
-        config,
+        config: fitted,
       };
 
       const result = { model, thinkingLevel };
@@ -889,6 +947,7 @@ export default function (pi) {
       const pct = (n) => `${Math.round(num(n) * 100)}%`;
       const text =
         `router: [${s.profile || "?"}] ${s.model}:${s.thinkingLevel} (${s.tier || "?"}) · ${s.reason || "no reason recorded"} · ` +
+        (s.config.closedLoop ? "closed loop: level set per user turn · " : "") +
         `spend ${money(s.usage.cost)} vs soft ${money(s.config.softBudget)} / hard ${money(s.config.hardBudget)} · ` +
         `context ${pct(s.usage.contextPct)} · cache hit ${Math.round(num(s.usage.cacheHitPct))}% · ` +
         `classifier ${s.classifier || "deterministic fallback"}`;

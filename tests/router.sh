@@ -339,6 +339,51 @@ await t("route() resolves Model objects from Pi's previous/failed through the re
   try { await vm.route({ reason: "user", thinkingLevel: "medium", messages: [user("go")] }, bare); } catch (e) { msg = String(e.message); }
   eq(/is not in the catalog/.test(msg), true, "a missing model is a setup error, not a silent switch");
 });
+// Closed-loop providers (Claude Code, agy) run the tool loop themselves: only the user-turn level is ever sent.
+await t("claude-bridge and antigravity are closed loops by default; the env overrides the list", () => {
+  eq(m.isClosedLoop("claude-bridge/claude-opus-5-5", {}), true, "claude-bridge");
+  eq(m.isClosedLoop("antigravity/claude-opus-5-5", {}), true, "antigravity");
+  eq(m.isClosedLoop("deepseek/deepseek-flash", {}), false, "deepseek");
+  eq(m.isClosedLoop("claude-bridge/x", { ORCHESTRA_ROUTER_CLOSED_LOOP: "none" }), false, "none");
+  eq(m.isClosedLoop("p/x", { ORCHESTRA_ROUTER_CLOSED_LOOP: "q, p" }), true, "custom list");
+  eq(m.readRouterConfig({}, "cb").closedLoop, true, "cb profile");
+  eq(m.readRouterConfig({}, "ds").closedLoop, false, "ds profile");
+});
+await t("a closed-loop continuation keeps the user-turn level after clean tools and after a failure", () => {
+  const c = { ...cfg, model: "claude-bridge/claude-opus-5-5", closedLoop: true };
+  const clean = m.decideRoute({ reason: "continuation", previous: { model: c.model, thinkingLevel: "medium" }, messages: [user("go"), tool("ok"), tool("ok"), tool("ok")], config: c, state: { tier: "deep" } });
+  eq(clean.thinkingLevel, "medium", "clean tools do not step down");
+  eq(/closed loop/.test(clean.state.lastReason), true, "reason names the closed loop");
+  const failed = m.decideRoute({ reason: "continuation", previous: { model: c.model, thinkingLevel: "low" }, messages: [user("go"), tool("FAIL tests")], config: c, state: { tier: "standard" } });
+  eq(failed.thinkingLevel, "low", "a failure cannot bump a level that is never sent");
+  const open = m.decideRoute({ reason: "continuation", previous: { model: cfg.model, thinkingLevel: "low" }, messages: [user("go"), tool("FAIL tests")], config: cfg, state: { tier: "standard" } });
+  eq(open.thinkingLevel, "medium", "an open loop still bumps");
+});
+const claudeModel = { provider: "claude-bridge", id: "claude-opus-5-5", reasoning: true, thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh" } };
+await t("named profiles are fitted to the model's real ladder", () => {
+  const cb = m.fitConfigToModel(m.readRouterConfig({}, "cb"), claudeModel);
+  eq(cb.levels, ["low", "medium", "high"], "claude has no off");
+  eq(cb.tiers, { routine: "low", standard: "low", deep: "medium" }, "claude tiers");
+  const pro = { provider: "deepseek", id: "deepseek-v4-pro", reasoning: true, thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high" } };
+  const ds = m.fitConfigToModel(m.readRouterConfig({}, "ds"), pro);
+  eq(ds.levels, ["off", "high"], "v4 pro levels");
+  eq(ds.tiers, { routine: "off", standard: "off", deep: "high" }, "v4 pro tiers");
+  const flashModel = { provider: "deepseek", id: "deepseek-flash", reasoning: true, thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high" } };
+  const fl = m.readRouterConfig({}, "flash");
+  eq(m.fitConfigToModel(fl, flashModel).tiers, fl.tiers, "flash keeps its tiers");
+  eq(m.fitConfigToModel(fl, { provider: "p", id: "x" }), fl, "a model without reasoning info leaves the config alone");
+});
+await t("route() on cb-auto sends and records a level Claude really has", async () => {
+  let vm;
+  m.default({ registerVirtualModel: (d) => { if (d.id === "cb-auto") vm = d; }, registerCommand: () => {} });
+  const ctx = { modelRegistry: { find: (p, id) => (p === claudeModel.provider && id === claudeModel.id ? claudeModel : null) } };
+  const r = await vm.route({ reason: "user", thinkingLevel: "medium", messages: [user("status")] }, ctx);
+  eq(r.model, claudeModel, "model");
+  eq(r.thinkingLevel, "low", "routine on a model without off runs low");
+  eq(r.state.lastThinking, "low", "state records the level that is sent");
+  const cont = await vm.route({ reason: "continuation", thinkingLevel: "medium", messages: [user("status"), tool("ok"), tool("ok")], previous: { model: claudeModel, thinkingLevel: "low" }, state: r.state }, ctx);
+  eq(cont.thinkingLevel, "low", "continuation keeps the turn level");
+});
 console.log(`part1: ${pass} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);
 JS
