@@ -73,9 +73,10 @@ main() {
     ) >/dev/null 2>&1 || { bad "move main: other"; return 1; }
   }
 
-  # run_w <task> [args...]: run from the repository, as an orchestrator would.
-  run_w() { local task=$1; shift; ( cd "$REPO" && "$W" run "$task" "$@" ) >"$OUT" 2>&1; }
-  run_w_base() { local base=$1 task=$2; shift 2; ( cd "$REPO" && ORCHESTRA_BASE=$base "$W" run "$task" "$@" ) >"$OUT" 2>&1; }
+  # run_w <task> [args...]: run from the repository, as an orchestrator would. The fixture specs are minimal on
+  # purpose (this suite tests freshness, not the pre-run lint), so lint is skipped.
+  run_w() { local task=$1; shift; ( cd "$REPO" && "$W" run "$task" --skip-lint "$@" ) >"$OUT" 2>&1; }
+  run_w_base() { local base=$1 task=$2; shift 2; ( cd "$REPO" && ORCHESTRA_BASE=$base "$W" run "$task" --skip-lint "$@" ) >"$OUT" 2>&1; }
 
   local rc
 
