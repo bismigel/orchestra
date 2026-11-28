@@ -2,7 +2,8 @@
 # orchestra-worker: run one sandboxed worker agent on one task, then check what it did.
 #
 #   orchestra-worker run <task-id> --spec <file> [--worktree <dir>] [--feedback <file>] [--dry-run] [--allow-stale]
-#   orchestra-worker run <task-id> --prompt "<text>" [--worktree <dir>] [--dry-run]
+#                                             [--skip-lint] [--local-worktree]
+#   orchestra-worker run <task-id> --prompt "<text>" [--worktree <dir>] [--dry-run] [--local-worktree]
 #   orchestra-worker summary <task-id> [--worktree <dir>]
 #   orchestra-worker diff <task-id> [--worktree <dir>] [--stat] [--rendered]
 #                                             review diff, generated files only in the stat; --rendered: the render command's diff
@@ -29,7 +30,7 @@
 #   orchestra-worker decide mark <task-id> <kind> <value>   record your own call, to compare with Jev's
 #   orchestra-worker decide report [--json]   Jev against your calls
 #   orchestra-worker doctor                   check the setup: sandbox, harness, key, model, base, gate
-#   orchestra-worker guide [<name>] [--print] path of a guide: orchestrator, planning, ops, security, proofs, …
+#   orchestra-worker guide [<name>] [--print|--cat] path of a guide: orchestrator, planning, ops, security, proofs, …
 #
 # prove runs the landing gate and the task's `proof:` checks in the worktree (outside the sandbox) and records one
 # line per check, bound to a hash of the exact code. land rebases, squashes, proves that code and pushes, with
@@ -94,6 +95,7 @@ load_config() {
   ORCHESTRA_SANDBOX=${ORCHESTRA_SANDBOX:-bwrap}
   ORCHESTRA_DEVENV_CMD=${ORCHESTRA_DEVENV_CMD:-}
   ORCHESTRA_WORKTREE_CMD=${ORCHESTRA_WORKTREE_CMD:-}
+  ORCHESTRA_WORKTREE_LOCAL=${ORCHESTRA_WORKTREE_LOCAL:-0}       # 1: a plain local worktree even when WORKTREE_CMD is set
   ORCHESTRA_STATE_CMD=${ORCHESTRA_STATE_CMD:-}                  # host-side read-only live-state snapshot for scouts
   ORCHESTRA_RENDER_CMD=${ORCHESTRA_RENDER_CMD:-}                # prints the rendered form of a worktree (diff --rendered)
   ORCHESTRA_ARTIFACTS_DIR=${ORCHESTRA_ARTIFACTS_DIR:-}
@@ -120,9 +122,32 @@ load_config() {
   [ -n "$ORCHESTRA_MODEL" ] || die "set ORCHESTRA_MODEL (provider/model, e.g. deepseek/deepseek-flash) in config.env"
 }
 
+# spec_task_id <repo> <spec>: print the front-matter id when <spec> is a task file in ORCHESTRA_TASKS_DIR, else
+# nothing. This gates the pre-run lint: a spec outside the task board (a draft, another repository) is not linted.
+spec_task_id() {
+  local repo=$1 spec=$2
+  [ -f "$spec" ] || return 0
+  local id
+  id=$(awk 'NR == 1 { if ($0 != "---") exit; next }
+            $0 == "---" { closed=1; exit }
+            !id && /^id:[ \t]*/ { line=$0; sub(/^id:[ \t]*/, "", line); sub(/[ \t\r]+$/, "", line); id=line }
+            END { if (closed && id != "") print id }' "$spec")
+  [ -n "$id" ] || return 0
+  [ "$(realpath -m "$(dirname "$spec")")" = "$(realpath -m "$repo/$ORCHESTRA_TASKS_DIR")" ] || return 0
+  printf '%s\n' "$id"
+}
+
+# lint_task_spec <here> <repo> <id>: run the deterministic task lint from <repo>, with the configured board, base and
+# profile; prints its combined output. The caller decides whether a failure is fatal.
+lint_task_spec() {
+  local here=$1 repo=$2 id=$3
+  ( cd "$repo" && python3 -I "$here/lib/task_lint.py" "$id" \
+      --tasks-dir "$ORCHESTRA_TASKS_DIR" --base "$ORCHESTRA_BASE" --profile "$ORCHESTRA_PROFILE" 2>&1 )
+}
+
 cmd_run() {
   local here=$1; shift
-  local task="" spec="" wt="" feedback="" prompt_spec="" dry=0 allow_stale=0
+  local task="" spec="" wt="" feedback="" prompt_spec="" dry=0 allow_stale=0 skip_lint=0 local_wt=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --spec) spec=${2:?}; shift 2 ;;
@@ -131,11 +156,13 @@ cmd_run() {
       --feedback) feedback=${2:?}; shift 2 ;;
       --dry-run) dry=1; shift ;;
       --allow-stale) allow_stale=1; shift ;;
+      --skip-lint) skip_lint=1; shift ;;
+      --local-worktree) local_wt=1; shift ;;
       -*) die "unknown option $1" ;;
       *) [ -z "$task" ] || die "one task id only"; task=$1; shift ;;
     esac
   done
-  [ -n "$task" ] || die "usage: orchestra-worker run <task-id> (--spec <file> | --prompt <text>) [--worktree <dir>] [--feedback <file>] [--allow-stale]"
+  [ -n "$task" ] || die "usage: orchestra-worker run <task-id> (--spec <file> | --prompt <text>) [--worktree <dir>] [--feedback <file>] [--allow-stale] [--skip-lint] [--local-worktree]"
   [[ $task =~ ^[A-Za-z0-9._-]+$ ]] || die "task id may contain letters, digits, . _ - only"
   if [ -n "$prompt_spec" ]; then
     [ -z "$spec" ] || die "--prompt and --spec are mutually exclusive"
@@ -144,6 +171,7 @@ cmd_run() {
 
   local repo; repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "run inside a git repository"
   load_config "$repo"
+  [ "$ORCHESTRA_WORKTREE_LOCAL" != 1 ] || local_wt=1
   local harness_file="$here/lib/harness/$ORCHESTRA_HARNESS.sh"
   case "$ORCHESTRA_HARNESS" in */*) harness_file=$(realpath -m "$ORCHESTRA_HARNESS") ;; esac   # a path: custom harness
   [ -f "$harness_file" ] || die "unknown harness '$ORCHESTRA_HARNESS' (lib/harness/*.sh, or a path to a .sh file)"
@@ -156,13 +184,33 @@ cmd_run() {
     model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
   fi
 
+  # A spec on the task board is linted before the worktree, so a broken spec costs no worker run. Only a first run
+  # with --spec: --prompt has no board file, and --feedback is a later round on an already accepted spec.
+  if [ -n "$spec" ] && [ -z "$prompt_spec" ] && [ -z "$feedback" ] && [ "$skip_lint" = 0 ]; then
+    local lint_id lint_out lint_rc=0
+    lint_id=$(spec_task_id "$repo" "$spec")
+    if [ -n "$lint_id" ]; then
+      lint_out=$(lint_task_spec "$here" "$repo" "$lint_id") || lint_rc=$?
+      if [ "$lint_rc" != 0 ]; then
+        printf '%s\n' "$lint_out" >&2
+        die "task lint failed for $lint_id: fix the spec, or pass --skip-lint"
+      fi
+    fi
+  fi
+
   # Worktree: one per task, next to the repository unless given.
   local common; common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
   [ -n "$wt" ] || wt="$(dirname "$repo")/$(basename "$repo")-worktrees/$task"
   wt=$(realpath -m "$wt")
   if [ ! -d "$wt" ] && [ "$dry" = 1 ]; then
     # A dry run changes nothing: report what would happen and stop before any worktree, claim or state is created.
-    log "dry run: would create the worktree $wt (${ORCHESTRA_WORKTREE_CMD:-git worktree add -b orchestra/$task})"
+    if [ "$local_wt" = 1 ] || [ -z "$ORCHESTRA_WORKTREE_CMD" ]; then
+      local start_ref=HEAD
+      if git -C "$repo" rev-parse --verify -q "$ORCHESTRA_BASE^{commit}" >/dev/null; then start_ref=$ORCHESTRA_BASE; fi
+      log "dry run: would create the worktree $wt (git worktree add -q -b orchestra/$task $wt $start_ref)"
+    else
+      log "dry run: would create the worktree $wt (${ORCHESTRA_WORKTREE_CMD//\{task\}/$task})"
+    fi
     log "dry run: task $task, harness $ORCHESTRA_HARNESS, model $ORCHESTRA_MODEL; nothing was changed"
     DRY_RUN=1
     local -a hargv sandbox
@@ -173,7 +221,7 @@ cmd_run() {
   fi
   if [ ! -d "$wt" ]; then
     [ -z "$feedback" ] || die "$wt does not exist: nothing to give feedback to"
-    if [ -n "$ORCHESTRA_WORKTREE_CMD" ]; then
+    if [ "$local_wt" = 0 ] && [ -n "$ORCHESTRA_WORKTREE_CMD" ]; then
       (cd "$repo" && bash -c "${ORCHESTRA_WORKTREE_CMD//\{task\}/$task}") >&2
     else
       local start_ref=HEAD
@@ -1017,13 +1065,15 @@ cmd_doctor() {
   [ "$nfail" = 0 ]
 }
 
-# cmd_guide [<name>] [--print]: the absolute path of a guide (or its text), so skills never guess relative paths.
+# cmd_guide [<name>] [--print|--cat]: the absolute path of a guide (or its text), so skills never guess relative paths
+# and a harness never has to read a path outside its workspace. --cat is an exact synonym of --print.
 cmd_guide() {
   local here=$1; shift; local name="" print=0
-  while [ $# -gt 0 ]; do case "$1" in --print) print=1; shift ;; -*) die "unknown option $1" ;; *) name=$1; shift ;; esac; done
-  local f
+  while [ $# -gt 0 ]; do case "$1" in --print|--cat) print=1; shift ;; -*) die "unknown option $1" ;; *) name=$1; shift ;; esac; done
+  local f path="$here/docs"
   case "${name:-orchestrator}" in
     orchestrator|orchestra) f=orchestrator-guide.md ;;
+    land) f=orchestra-land/SKILL.md; path="$here/skills/claude-code" ;;
     planning|plan|refine) f=planning-guide.md ;;
     ops) f=ops-guide.md ;;
     security) f=security.md ;;
@@ -1033,9 +1083,9 @@ cmd_guide() {
     router) f=router.md ;;
     jev|decide) f=jev.md ;;
     templates) echo "$here/templates"; return 0 ;;
-    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, router, jev, templates)" ;;
+    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, router, jev, land, templates)" ;;
   esac
-  if [ "$print" = 1 ]; then cat "$here/docs/$f"; else echo "$here/docs/$f"; fi
+  if [ "$print" = 1 ]; then cat "$path/$f"; else echo "$path/$f"; fi
 }
 
 # cmd_artifact: collect one task's report, diff and proofs as an artifact (lib/artifact.py, installed separately).
@@ -1122,6 +1172,19 @@ cmd_scout() {
     ORCHESTRA_ROUTER_EXT=$(realpath "$ORCHESTRA_ROUTER_EXT")
   else
     model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
+  fi
+
+  # A spec on the task board is linted first, but a scout reads a draft: problems are reported, never fatal.
+  if [ -n "$spec" ]; then
+    local lint_id lint_out lint_rc=0
+    lint_id=$(spec_task_id "$repo" "$spec")
+    if [ -n "$lint_id" ]; then
+      lint_out=$(lint_task_spec "$here" "$repo" "$lint_id") || lint_rc=$?
+      if [ "$lint_rc" != 0 ]; then
+        echo "scout: task lint found problems (the scout runs anyway):" >&2
+        printf '%s\n' "$lint_out" >&2
+      fi
+    fi
   fi
 
   local state; state="$(dirname "$repo")/$(basename "$repo")-worktrees/.scout/$task"
