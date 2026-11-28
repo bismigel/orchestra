@@ -102,6 +102,19 @@ main() {
   path=$("$W" guide templates 2>/dev/null); rc=$?
   if [ "$rc" = 0 ] && [ -d "$path" ]; then ok "guide templates prints an existing directory"
   else bad "guide templates: rc $rc, '$path' is not an existing directory"; fi
+  # Progressive disclosure: list, contents, one section.
+  if grep -q '^orchestrator  *Orchestrator guide' <<<"$("$W" guide --list 2>/dev/null)"; then ok "guide --list names each guide"
+  else bad "guide --list lacks the orchestrator guide"; fi
+  if grep -q '^ *[0-9][0-9]*\. Landing$' <<<"$("$W" guide orchestrator --toc 2>/dev/null)"; then ok "guide --toc numbers the headings"
+  else bad "guide orchestrator --toc lacks a numbered Landing heading"; fi
+  local sect; sect=$("$W" guide orchestrator --section landing 2>/dev/null)
+  if [ "$(head -n1 <<<"$sect")" = "## Landing" ] && ! grep -q '^## Setup check' <<<"$sect"; then ok "guide --section prints one section"
+  else bad "guide --section landing did not print exactly the Landing section"; fi
+  local n; n=$("$W" guide orchestrator --toc | grep -n 'Landing$' | sed -E 's/^[0-9]+: *([0-9]+)\..*/\1/')
+  if [ "$("$W" guide orchestrator --section "$n" 2>/dev/null | head -n1)" = "## Landing" ]; then ok "guide --section takes a toc number"
+  else bad "guide --section $n did not print Landing"; fi
+  "$W" guide orchestrator --section no-such-heading >/dev/null 2>&1; rc=$?
+  if [ "$rc" = 2 ]; then ok "guide --section with an unknown heading exits 2"; else bad "unknown section: rc $rc, want 2"; fi
   "$W" guide frobnicate >/dev/null 2>&1; rc=$?
   if [ "$rc" = 2 ]; then ok "guide with an unknown name exits 2"
   else bad "guide frobnicate: rc $rc, want 2"; fi

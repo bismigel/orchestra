@@ -46,7 +46,7 @@ PY
 current_tree() {
   local wt=$1 idx tree rc
   idx=$(mktemp)
-  cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
+  cp -p "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
   GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1
   tree=$(GIT_INDEX_FILE=$idx git -C "$wt" write-tree)
   rc=$?

@@ -30,7 +30,7 @@
 #   orchestra-worker decide mark <task-id> <kind> <value>   record your own call, to compare with Jev's
 #   orchestra-worker decide report [--json]   Jev against your calls
 #   orchestra-worker doctor                   check the setup: sandbox, harness, key, model, base, gate
-#   orchestra-worker guide [<name>] [--print|--cat] path of a guide: orchestrator, planning, ops, security, proofs, …
+#   orchestra-worker guide [--list | <name> [--toc | --section <n|text> | --cat]]   guides, a piece at a time
 #
 # prove runs the landing gate and the task's `proof:` checks in the worktree (outside the sandbox) and records one
 # line per check, bound to a hash of the exact code. land rebases, squashes, proves that code and pushes, with
@@ -1065,27 +1065,69 @@ cmd_doctor() {
   [ "$nfail" = 0 ]
 }
 
-# cmd_guide [<name>] [--print|--cat]: the absolute path of a guide (or its text), so skills never guess relative paths
-# and a harness never has to read a path outside its workspace. --cat is an exact synonym of --print.
-cmd_guide() {
-  local here=$1; shift; local name="" print=0
-  while [ $# -gt 0 ]; do case "$1" in --print|--cat) print=1; shift ;; -*) die "unknown option $1" ;; *) name=$1; shift ;; esac; done
-  local f path="$here/docs"
-  case "${name:-orchestrator}" in
-    orchestrator|orchestra) f=orchestrator-guide.md ;;
-    land) f=orchestra-land/SKILL.md; path="$here/skills/claude-code" ;;
-    planning|plan|refine) f=planning-guide.md ;;
-    ops) f=ops-guide.md ;;
-    security) f=security.md ;;
-    proofs) f=proofs.md ;;
-    design) f=design.md ;;
-    harness) f=adding-a-harness.md ;;
-    router) f=router.md ;;
-    jev|decide) f=jev.md ;;
-    templates) echo "$here/templates"; return 0 ;;
-    *) die "unknown guide '$name' (orchestrator, planning, ops, security, proofs, design, harness, router, jev, land, templates)" ;;
+# cmd_guide: orchestra's guides, a piece at a time (progressive disclosure). No option: the guide's path. --list: every
+# guide with its title. --toc: one guide's headings, numbered. --section <n|text>: one section (a heading number from
+# --toc, or a case-insensitive part of the heading). --cat (= --print): the whole text. Text output never makes a
+# harness read a path outside its workspace.
+GUIDES="orchestrator planning ops land jev router proofs security design harness"
+guide_file() {
+  local here=$1 name=$2
+  case "$name" in
+    orchestrator|orchestra) echo "$here/docs/orchestrator-guide.md" ;;
+    land) echo "$here/skills/claude-code/orchestra-land/SKILL.md" ;;
+    planning|plan|refine) echo "$here/docs/planning-guide.md" ;;
+    ops) echo "$here/docs/ops-guide.md" ;;
+    security) echo "$here/docs/security.md" ;;
+    proofs) echo "$here/docs/proofs.md" ;;
+    design) echo "$here/docs/design.md" ;;
+    harness) echo "$here/docs/adding-a-harness.md" ;;
+    router) echo "$here/docs/router.md" ;;
+    jev|decide) echo "$here/docs/jev.md" ;;
+    *) die "unknown guide '$name' (${GUIDES// /, }, templates)" ;;
   esac
-  if [ "$print" = 1 ]; then cat "$path/$f"; else echo "$path/$f"; fi
+}
+# guide_headings <file>: "<level>\t<heading>" per Markdown heading of level 2 or 3, outside code fences.
+guide_headings() {
+  awk '/^```/{c=!c; next} !c && /^###? /{l=($0 ~ /^### /)?3:2; sub(/^#+ /,""); print l "\t" $0}' "$1"
+}
+cmd_guide() {
+  local here=$1; shift; local name="" mode=path want=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --print|--cat) mode=full; shift ;;
+    --toc) mode=toc; shift ;;
+    --list) mode=list; shift ;;
+    --section) mode=section; want=${2:?--section needs a heading number or text}; shift 2 ;;
+    -*) die "unknown option $1" ;;
+    *) name=$1; shift ;;
+  esac; done
+  if [ "$mode" = list ]; then
+    local g
+    for g in $GUIDES; do printf '%-13s %s\n' "$g" "$(grep -m1 '^# ' "$(guide_file "$here" "$g")" | sed 's/^# //; s/^name: //')"; done
+    echo "templates     task and lessons templates (a directory)"
+    echo "next: orchestra-worker guide <name> --toc, then --section <n>"
+    return 0
+  fi
+  if [ "${name:-}" = templates ]; then echo "$here/templates"; return 0; fi
+  local f; f=$(guide_file "$here" "${name:-orchestrator}")
+  case "$mode" in
+    path) echo "$f" ;;
+    full) cat "$f" ;;
+    toc)
+      guide_headings "$f" | awk -F'\t' '{n++; printf "%s%2d. %s\n", ($1==3?"    ":""), n, $2}'
+      echo "next: orchestra-worker guide ${name:-orchestrator} --section <n>" ;;
+    section)
+      local idx
+      idx=$(guide_headings "$f" | awk -F'\t' -v w="$want" '
+        BEGIN { lw = tolower(w) }
+        { n++; if ((w ~ /^[0-9]+$/ && n == w + 0) || (w !~ /^[0-9]+$/ && index(tolower($2), lw))) { print n; exit } }')
+      [ -n "$idx" ] || die "no section '$want' in guide ${name:-orchestrator} (see: orchestra-worker guide ${name:-orchestrator} --toc)"
+      awk -v want="$idx" '
+        /^```/ { c = !c }
+        !c && /^###? / { n++; l = ($0 ~ /^### /) ? 3 : 2
+          if (on && l <= lvl) exit
+          if (n == want) { on = 1; lvl = l } }
+        on' "$f" ;;
+  esac
 }
 
 # cmd_artifact: collect one task's report, diff and proofs as an artifact (lib/artifact.py, installed separately).
@@ -1284,10 +1326,12 @@ task_setup() {
 }
 
 # work_tree <wt>: the git tree hash of everything in the worktree (tracked and untracked, not ignored), without
-# touching the real index. Any change to the code changes it, which is what makes a proof stale.
+# touching the real index. The copy keeps the index mtime (cp -p): git compares it with file mtimes to re-hash racily
+# clean entries, and a fresh mtime would hide an edit made in the same second as the last index write. Any change to
+# the code changes the hash, which is what makes a proof stale.
 work_tree() {
   local wt=$1 idx; idx=$(mktemp)
-  cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
+  cp -p "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
   GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1
   GIT_INDEX_FILE=$idx git -C "$wt" write-tree; rm -f "$idx"
 }
@@ -1394,7 +1438,7 @@ cmd_diff() {
     return 0
   fi
   local mb; mb=$(git -C "$wt" merge-base HEAD "$ORCHESTRA_BASE" 2>/dev/null) || die "no merge base with $ORCHESTRA_BASE (fetch first?)"
-  local idx; idx=$(mktemp); cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx"
+  local idx; idx=$(mktemp); cp -p "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx"
   GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1
   local -a ex=(); local g; for g in $ORCHESTRA_GENERATED; do ex+=(":(exclude,glob)**/$g"); done
   GIT_INDEX_FILE=$idx git -C "$wt" --no-pager diff --cached --stat=120 "$mb" -- . ':(exclude).orchestra'

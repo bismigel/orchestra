@@ -50,20 +50,33 @@ cache. `ORCHESTRA_ROUTER_PER_MODEL=0` turns per-model routers off. Env model pin
 ## Thinking levels: frugal by default
 
 Reasoning tokens cost money and mostly do not improve mechanical work, so the router spends them only where
-they pay. The mapping is per profile (`tiers` in `PROFILE_DEFAULTS`):
+they pay. Every profile starts from one ladder, fitted to its model (below):
 
-| tier | ds / gemini / claude | flash (workers) |
+| tier | default | Flash (no `medium`) |
 |---|---|---|
 | routine | `off` | `off` |
 | standard | `low` | `low` |
 | deep | `medium` (`high` only when the virtual level is explicitly `high`) | `high` |
 
-`xhigh` is never emitted. `clampLevel()` maps a requested level onto the levels a profile's physical model
-actually offers, never raising the request — Flash has no `medium` tier, so `medium` clamps to `low`.
+This is a default, not a per-model table. At each request the router fits it to the physical model's real ladder
+(`fitConfigToModel`): levels the catalog model lacks are dropped, and when a tier no longer fits, the tiers are rebuilt
+on the model's own ladder as the per-model routers do. Claude 5.5 has no `off`, so its routine and standard turns run
+`low`; DeepSeek V4 Pro offers only `off` and `high`, so routine and standard run `off` and deep runs `high`. Without
+this, pi would clamp the level on its own (upward) and the router would report a level that never ran. `xhigh` is
+never emitted, and the session state and `/router` record the level that was really sent.
 
 Continuation turns keep the model and only walk the level: a failing tool result (`BLOCKING`, `RISK NOTES`, `FAIL`, a
 non-zero exit) bumps to at least the deep level (the standard level when the turn started routine), and two
 consecutive clean tool results step the level down one notch.
+
+### Closed-loop providers (Claude Code, Antigravity)
+
+`claude-bridge` (Claude Code) and `antigravity` (agy) run the model's tool loop themselves: pi's first request of a
+user turn starts one Claude Code or agy turn with that effort, and the tool steps after it are served inside that same
+turn. A continuation route can change nothing there, so on these providers the router keeps the user-turn level for
+the whole turn (no step-down, no failure bump) and says so in its reason and in `/router`. The level is chosen once
+per user message, by the tier. Set the provider list with `ORCHESTRA_ROUTER_CLOSED_LOOP` (comma separated, `none` for
+no provider; default `claude-bridge,antigravity`).
 
 Spend and context only lower the level: past the soft budget or the context-pressure threshold a standard or routine
 turn steps down one notch and a deep `high` turn is capped at `medium`; past the hard budget routine is `off` and

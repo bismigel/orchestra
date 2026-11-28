@@ -1,6 +1,20 @@
 # Changelog
 
 ## 0.8.0 (unreleased)
+- **The router tells the truth on Claude.** `claude-bridge` and `antigravity` run their own tool loop, so only the
+first route of a user turn reaches the model. On those providers (`ORCHESTRA_ROUTER_CLOSED_LOOP`) continuations now
+keep the user-turn level instead of recording step-downs and bumps that were never sent. Named profiles are fitted to
+the catalog model's real thinking ladder (Claude 5.5 has no `off`; DeepSeek V4 Pro has only `off` and `high`, so its
+standard turns now run `off` instead of being clamped up to `high` by pi), and the state records the level really sent.
+- **Pre-run lint and local worktrees** (#29). `run` lints a spec from the task board before it creates anything and
+refuses on failure (`--skip-lint`); `scout` warns. `run --local-worktree` / `ORCHESTRA_WORKTREE_LOCAL=1` skip
+`ORCHESTRA_WORKTREE_CMD`, so nothing is pushed before `land`.
+- **Progressive disclosure.** `orchestra-worker guide --list`, `guide <name> --toc`, `guide <name> --section <n|text>`
+and `--cat` print guides a piece at a time (pi: the `orchestra_guide` tool); the orchestra skill is now the loop
+only, with pointers into the guides.
+- **Direct-edit nudge (pi).** In a repository that uses orchestra, the pi extension appends one reminder when the
+orchestrator has edited `ORCHESTRA_DIRECT_EDIT_WARN` (default 3) source files itself since the last worker run.
+`orchestra-worker decide mark <id> split orchestrator` silences it; `0` turns it off.
 - **One router per physical model.** Every reasoning chat model in the catalog gets `orchestra/<provider>-<model>-auto`,
 which is pinned to that model and uses the frugal tiers on its own thinking levels. The list is built at `session_start`
 and cached (`ORCHESTRA_ROUTER_CACHE`, default `$XDG_CACHE_HOME/orchestra/router-models.json`), so `--model`,

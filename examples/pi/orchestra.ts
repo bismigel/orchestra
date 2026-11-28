@@ -7,6 +7,8 @@
 // updates, for the person watching. Workers never load extensions (they start pi with --no-extensions).
 // @ts-nocheck
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "typebox";
 
 const BIN = "orchestra-worker";
@@ -112,7 +114,104 @@ function textResult(title, code, body, extra) {
   };
 }
 
+// ---- direct-edit nudge ------------------------------------------------------------------------------------------
+// An orchestrator that keeps editing source files itself has usually skipped the spec (a `split` task kept on the
+// expensive model). In a repository that uses orchestra, count the distinct source files changed with native
+// edit/write since the last worker run, and append one reminder to the tool result at the threshold (and at every
+// multiple of it). ORCHESTRA_DIRECT_EDIT_WARN sets the threshold (default 3; 0 turns it off). A worker run resets
+// the count; `orchestra-worker decide mark <id> split orchestrator` silences it for the session.
+
+/** The repository root above `cwd` that uses orchestra (.orchestra/config.env or a tasks dir), or null. */
+export function orchestraRoot(cwd, exists = existsSync) {
+  let dir = resolve(cwd || ".");
+  for (;;) {
+    if (exists(join(dir, ".orchestra", "config.env")) || exists(join(dir, "docs", "work", "tasks"))) return dir;
+    if (exists(join(dir, ".git"))) return null;
+    const up = dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+}
+
+/** A path the orchestrator is expected to write itself: specs, docs, Markdown, orchestra state, or outside the repo. */
+export function isOrchestratorPath(path, root, tasksDir = "docs/work/tasks") {
+  const rel = relative(root, isAbsolute(path) ? path : resolve(root, path)).split("\\").join("/");
+  if (!rel || rel.startsWith("../") || isAbsolute(rel)) return true;
+  const t = String(tasksDir || "").replace(/\/+$/, "");
+  return (
+    (t && (rel === t || rel.startsWith(t + "/"))) ||
+    rel.startsWith(".orchestra/") ||
+    rel.startsWith("docs/") ||
+    /\.(md|mdx|txt)$/i.test(rel)
+  );
+}
+
+export function directEditThreshold(env = process.env) {
+  const raw = env.ORCHESTRA_DIRECT_EDIT_WARN;
+  const n = raw == null || raw === "" ? 3 : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 3;
+}
+
+const DECIDE_ORCHESTRATOR = /orchestra-worker\s+decide\s+mark\s+\S+\s+split\s+orchestrator\b/;
+
+export function createDirectEditTracker(env = process.env) {
+  const threshold = directEditThreshold(env);
+  let files = new Set();
+  let quiet = false;
+  return {
+    reset() {
+      files = new Set();
+    },
+    count() {
+      return files.size;
+    },
+    /** Feed one finished tool call; returns the reminder to append, or null. */
+    observe({ toolName, input, isError, cwd }) {
+      if (toolName === "orchestra_run") {
+        files = new Set();
+        return null;
+      }
+      if (toolName === "bash" && input && DECIDE_ORCHESTRATOR.test(String(input.command || ""))) {
+        quiet = true;
+        return null;
+      }
+      if (quiet || threshold === 0 || isError || (toolName !== "edit" && toolName !== "write")) return null;
+      const path = input && typeof input.path === "string" ? input.path : "";
+      const root = path ? orchestraRoot(cwd) : null;
+      if (!root) return null;
+      const abs = isAbsolute(path) ? path : resolve(cwd || root, path);
+      if (isOrchestratorPath(abs, root, env.ORCHESTRA_TASKS_DIR || "docs/work/tasks")) return null;
+      const before = files.size;
+      files.add(abs);
+      const n = files.size;
+      if (n === before || n % threshold !== 0) return null;
+      return (
+        `[orchestra] ${n} source files edited directly since the last worker run. If this is mechanical multi-file ` +
+        "work (call sites, generated code, tests), it is a `split` task: settle the decisions and the risky test " +
+        "rows in a spec, `orchestra-task lint <id> --strict`, then orchestra_scout and orchestra_run. If the work " +
+        "really is orchestrator-class, record it with `orchestra-worker decide mark <id> split orchestrator` (this " +
+        "reminder stops) or set ORCHESTRA_DIRECT_EDIT_WARN=0."
+      );
+    },
+  };
+}
+
 export default function (pi) {
+  const edits = createDirectEditTracker();
+  if (typeof pi.on === "function") {
+    pi.on("session_start", () => edits.reset());
+    pi.on("tool_result", (event, ctx) => {
+      try {
+        const note = edits.observe({ toolName: event.toolName, input: event.input, isError: event.isError, cwd: (ctx && ctx.cwd) || process.cwd() });
+        if (!note) return undefined;
+        const content = Array.isArray(event.content) ? event.content : [];
+        return { content: [...content, { type: "text", text: "\n" + note }] };
+      } catch {
+        return undefined; // a reminder is never worth breaking a tool result
+      }
+    });
+  }
+
   // ---- scout ---------------------------------------------------------------------------------------
   pi.registerTool({
     name: "orchestra_scout",
@@ -219,6 +318,31 @@ export default function (pi) {
         path: localPath,
         index,
       });
+    },
+  });
+
+  // ---- guide -------------------------------------------------------------------------------------------
+  // Progressive disclosure: the list, then one guide's contents, then one section. The whole text only on request.
+  pi.registerTool({
+    name: "orchestra_guide",
+    label: "orchestra guide",
+    description:
+      "Read orchestra's guides a piece at a time instead of reading files by path. No name: the list of guides. A " +
+      "name: that guide's sections. Add section (a heading or its number) for one section; full=true for the whole " +
+      "guide (large).",
+    parameters: Type.Object({
+      name: Type.Optional(Type.String({ description: "Guide: orchestrator, planning, ops, land, jev, router, proofs, security, design, harness" })),
+      section: Type.Optional(Type.String({ description: "Section heading (a substring is enough) or its number" })),
+      full: Type.Optional(Type.Boolean({ description: "The whole guide" })),
+      cwd: cwdParam,
+    }),
+    async execute(_id, p, signal) {
+      const args = ["guide"];
+      if (!p.name) args.push("--list");
+      else if (p.section) args.push(p.name, "--section", p.section);
+      else args.push(p.name, p.full ? "--cat" : "--toc");
+      const { code, out, err } = await runOW(args, p.cwd || process.cwd(), signal);
+      return textResult(`orchestra guide ${args.slice(1).join(" ")}`, code, tail((out || "") + (err ? "\n" + err : ""), 20000));
     },
   });
 

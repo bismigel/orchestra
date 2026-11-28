@@ -4,7 +4,9 @@ Instructions for the orchestrating agent (any agent: Claude Code, Codex, opencod
 from its instruction file (`AGENTS.md`, `CLAUDE.md`) or install the bundled skill. Read `design.md` once for the why.
 
 ## Before delegating a task
-1. **Classify it**: `worker`, `split` or `orchestrator` (design.md). If unsure, it is `split`.
+1. **Classify it**: `worker`, `split` or `orchestrator` (design.md). If unsure, it is `split`. A multi-file refactor
+   in a sensitive area (auth, sessions, headers) is `split`, not `orchestrator`: you settle the invariants and the
+   risky test rows, the worker makes the edits across the call sites, generated code and tests.
 2. **Write the decisions down.** Every judgment call the task contains becomes a rule in the spec. For `split` tasks,
    write the required test rows (input → exact expected output) for the risky cases yourself, especially the
    negatives: what must *not* change.
@@ -25,6 +27,16 @@ orchestra-worker run <task-id> --feedback review.md              # next round, s
 orchestra-worker summary <task-id>                               # status, report and cost so far
 orchestra-worker status [--json]                                  # what is running now, and what died silently
 ```
+A first run from a spec in the tasks directory (`ORCHESTRA_TASKS_DIR`, with front matter) runs `orchestra-task lint`
+on it before anything is spent, and refuses (exit 2) when lint fails; `--skip-lint` overrides. `scout` only warns.
+When `ORCHESTRA_WORKTREE_CMD` pushes a claim branch you may not push yet, `run --local-worktree` (or
+`ORCHESTRA_WORKTREE_LOCAL=1`) creates a plain local worktree instead; the push waits for `land`. Never fall back to a
+hand-made `git worktree add`: it skips lint and the worker.
+
+Guides load a piece at a time: `orchestra-worker guide --list`, `guide <name> --toc`, `guide <name> --section <n>`,
+or `--cat` for the whole text (pi: the `orchestra_guide` tool). They print text, so a harness that guards paths
+outside its workspace never has to read the skill's symlink target.
+
 Before a first run, `run` compares the worktree with `ORCHESTRA_BASE`: a worktree with no work yet is rebased onto
 it automatically, while one with work is refused (exit 2) when the task's spec changed on the base, so the worker
 cannot silently read an old spec. Pass `--allow-stale` to go ahead against the older code instead. `--feedback`
