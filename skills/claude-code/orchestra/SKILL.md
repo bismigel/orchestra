@@ -34,5 +34,5 @@ specs and never commit. This page is the loop. Details load on demand, one secti
    what landed, the rounds and the cost (`orchestra-worker summary <id>`), then append the spec gaps from
    `orchestra-worker lessons <id>` to the lessons file. → `guide land --cat`
 
-On demand, not by default: `orchestra-worker guide router` (thinking levels), `guide jev` (the `decide` second
-opinion), `guide ops` (infrastructure), `guide planning` (plan and refine a board).
+On demand, not by default: `orchestra-worker guide jev` (the `decide` second opinion), `guide ops`
+(infrastructure), `guide planning` (plan and refine a board).

@@ -37,6 +37,8 @@ main() {
   # Config and usage errors.
   expect_rc 2 "rejects a model outside the allowlist" env ORCHESTRA_ALLOWED_MODELS=other/model "$W" run t1 --spec spec.md --dry-run
   expect_rc 2 "rejects a bad task id" "$W" run 'bad id' --spec spec.md --dry-run
+  expect_rc 2 "a leftover ORCHESTRA_ROUTER_EXT is a config error" env ORCHESTRA_ROUTER_EXT=/x/router.ts "$W" run t1 --spec spec.md --dry-run
+  has "the error says what to change" "ORCHESTRA_ROUTER_EXT was removed"
   expect_rc 2 "feedback needs an existing worktree" "$W" run nope --feedback spec.md
 
   # Dry run: shows the plan, never fetches or prints the key.

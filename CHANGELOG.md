@@ -1,11 +1,11 @@
 # Changelog
 
 ## 0.8.0 (unreleased)
-- **The router tells the truth on Claude.** `claude-bridge` and `antigravity` run their own tool loop, so only the
-first route of a user turn reaches the model. On those providers (`ORCHESTRA_ROUTER_CLOSED_LOOP`) continuations now
-keep the user-turn level instead of recording step-downs and bumps that were never sent. Named profiles are fitted to
-the catalog model's real thinking ladder (Claude 5.5 has no `off`; DeepSeek V4 Pro has only `off` and `high`, so its
-standard turns now run `off` instead of being clamped up to `high` by pi), and the state records the level really sent.
+- **Removed the `orchestra/auto` router** (`examples/pi/orchestra-router.ts`, `docs/router.md`, `tests/router.sh`)
+and `ORCHESTRA_ROUTER_EXT`. On Claude Code and Antigravity it could only set the level once per user turn, on Claude
+there is no `off` to save with, and its own benchmark showed a fixed `low` as cheap as routing for workers. Workers
+run a real model at a fixed level (`ORCHESTRA_MODEL=deepseek/deepseek-flash`, `ORCHESTRA_THINKING=low`). A config
+that still sets `ORCHESTRA_ROUTER_EXT` stops with a message saying what to change.
 - **Pre-run lint and local worktrees** (#29). `run` lints a spec from the task board before it creates anything and
 refuses on failure (`--skip-lint`); `scout` warns. `run --local-worktree` / `ORCHESTRA_WORKTREE_LOCAL=1` skip
 `ORCHESTRA_WORKTREE_CMD`, so nothing is pushed before `land`.
@@ -15,11 +15,6 @@ only, with pointers into the guides.
 - **Direct-edit nudge (pi).** In a repository that uses orchestra, the pi extension appends one reminder when the
 orchestrator has edited `ORCHESTRA_DIRECT_EDIT_WARN` (default 3) source files itself since the last worker run.
 `orchestra-worker decide mark <id> split orchestrator` silences it; `0` turns it off.
-- **One router per physical model.** Every reasoning chat model in the catalog gets `orchestra/<provider>-<model>-auto`,
-which is pinned to that model and uses the frugal tiers on its own thinking levels. The list is built at `session_start`
-and cached (`ORCHESTRA_ROUTER_CACHE`, default `$XDG_CACHE_HOME/orchestra/router-models.json`), so `--model`,
-`--list-models` and resumed sessions find it at load. A session that cannot see a provider never erases that provider
-from the cache. Turn it off with `ORCHESTRA_ROUTER_PER_MODEL=0` ([docs/router.md](docs/router.md)).
 - **Jev, an advisory second opinion** (`ORCHESTRA_JEV=off|shadow|advise`, off by default; [docs/jev.md](docs/jev.md)).
 `orchestra-worker decide split|ready|triage` asks a classifier model (Jev on Cloudflare Workers AI, or any endpoint
 speaking the same body) three typed questions from `config/decisions.json`: worker, split or orchestrator for a spec;
@@ -29,14 +24,6 @@ and a verdict below it is never shown. State is whitelisted, redacted and capped
 `ORCHESTRA_JEV_KEY_CMD`, never a file, log or output; a failure is logged and never changes an exit code. Answers go
 to `<git dir>/orchestra/decisions.jsonl`; `decide mark` records your call and `decide report` compares the two.
 New: `lib/decide.py`, `config/decisions.json`, `tests/decide.sh`, `orchestra-worker guide jev`.
-- **The router no longer switches models** (`examples/pi/orchestra-router.ts`): every profile has one physical model
-and only the thinking level varies per turn. A model swap makes the next model reread the whole context at full price
-(prompt caches are per model). Removed: the strong/fast pair, the hard-budget demotion to the fast model, cache
-hysteresis, failover to the other model on a provider overload (a retry now keeps the failed request's model), and
-`isOverloadError`. A model missing from the catalog is now a setup error. `ORCHESTRA_ROUTER_MODEL` (and
-`ORCHESTRA_ROUTER_<PROFILE>_MODEL`) pins the model; `ORCHESTRA_ROUTER_STRONG` still works as an alias and
-`ORCHESTRA_ROUTER_FAST` is ignored. Defaults: `ds-auto` runs `deepseek-v4-pro` throughout (it used Flash for routine
-turns), `claude-auto` Opus, `gemini-auto` Carbon. Spend and context pressure now only lower the thinking level.
 - **`prove` records a candidate snapshot** in `.orchestra/candidate.json`: task, run, base and the commit it resolved
 to, the tree hash the proofs bound to, the spec and its blob hash, and the time. `review` shows a `candidate:` line,
 and both `review` (text and `--json`) and `land` report `candidate drift` with a stat when the worktree changed since.

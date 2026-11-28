@@ -6,6 +6,8 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 WORKER="$ROOT/bin/orchestra-worker"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Never read the developer's own config or an outer orchestra-worker's environment.
+export XDG_CONFIG_HOME="$TMP/cfg"; for _v in $(compgen -e | grep '^ORCHESTRA_' || true); do unset "$_v"; done
 pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
