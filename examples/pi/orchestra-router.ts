@@ -24,18 +24,19 @@ const DEFAULT_HARD_BUDGET = 4.0;
 const DEFAULT_CTX_PRESSURE = 0.7;
 
 // One profile per model family, each with exactly one physical model. The orchestrator picks a profile
-// (orchestra/<family>-auto) and the router only varies the thinking level on that model. Budgets and context
-// pressure are shared: they are session economics, not model-family properties.
+// (orchestra/<family>-auto) and the router only varies the thinking level on that model. All profiles share one
+// frugal ladder (routine off, standard low, deep medium); at each request it is fitted to the model's real levels
+// (fitConfigToModel), so Flash's deep becomes high and Claude's routine becomes low without a per-profile table.
+// Budgets and context pressure are shared: they are session economics, not model-family properties.
+const DEFAULT_TIERS = { routine: "off", standard: "low", deep: "medium" };
 const PROFILE_DEFAULTS = {
-  ds: { model: DEFAULT_MODEL, tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high", "xhigh"] },
-  gemini: { model: "antigravity/gemini-4-carbon", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
-  claude: { model: "antigravity/claude-opus-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
-  // Anthropic models reached through Claude Code and the user's Claude subscription (pi-claude-bridge), not through
-  // Antigravity. Same thinking ladder as the antigravity claude profile: the bridge forwards the level to Claude Code.
-  cb: { model: "claude-bridge/claude-opus-5-5", tiers: { routine: "off", standard: "low", deep: "medium" }, levels: ["off", "low", "medium", "high"] },
-  // Profile for orchestra workers: always Flash. Flash has no "medium" thinking tier (its catalog map is
-  // off/low/high), so "deep" maps straight to "high".
-  flash: { model: FLASH_MODEL, tiers: { routine: "off", standard: "low", deep: "high" }, levels: ["off", "low", "high"] },
+  ds: { model: DEFAULT_MODEL },
+  gemini: { model: "antigravity/gemini-4-carbon" },
+  claude: { model: "antigravity/claude-opus-5-5" },
+  // Claude through Claude Code and the user's subscription (pi-claude-bridge), not through Antigravity.
+  cb: { model: "claude-bridge/claude-opus-5-5" },
+  // Workers: always Flash.
+  flash: { model: FLASH_MODEL },
 };
 // Virtual-model id -> profile key. "auto" is the legacy id and stays the DeepSeek profile so an existing
 // ORCHESTRA_ROUTER_STRONG pin keeps working; "flash-auto" is the worker profile (always Flash).
@@ -81,8 +82,8 @@ export function readRouterConfig(env = process.env, profile = "ds", defs = null)
     softBudget: number("ORCHESTRA_ROUTER_SOFT_BUDGET", DEFAULT_SOFT_BUDGET),
     hardBudget: number("ORCHESTRA_ROUTER_HARD_BUDGET", DEFAULT_HARD_BUDGET),
     ctxPressure: number("ORCHESTRA_ROUTER_CTX_PRESSURE", DEFAULT_CTX_PRESSURE),
-    tiers: defs.tiers,
-    levels: defs.levels,
+    tiers: defs.tiers || DEFAULT_TIERS,
+    levels: defs.levels || LEVELS.filter((l) => l !== "xhigh"),
   };
 }
 

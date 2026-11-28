@@ -370,7 +370,7 @@ await t("named profiles are fitted to the model's real ladder", () => {
   eq(ds.tiers, { routine: "off", standard: "off", deep: "high" }, "v4 pro tiers");
   const flashModel = { provider: "deepseek", id: "deepseek-flash", reasoning: true, thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high" } };
   const fl = m.readRouterConfig({}, "flash");
-  eq(m.fitConfigToModel(fl, flashModel).tiers, fl.tiers, "flash keeps its tiers");
+  eq(m.fitConfigToModel(fl, flashModel).tiers, { routine: "off", standard: "low", deep: "high" }, "flash has no medium: deep runs high");
   eq(m.fitConfigToModel(fl, { provider: "p", id: "x" }), fl, "a model without reasoning info leaves the config alone");
 });
 await t("route() on cb-auto sends and records a level Claude really has", async () => {

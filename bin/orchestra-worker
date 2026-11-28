@@ -1093,7 +1093,7 @@ guide_headings() {
 cmd_guide() {
   local here=$1; shift; local name="" mode=path want=""
   while [ $# -gt 0 ]; do case "$1" in
-    --print|--cat) mode=cat; shift ;;
+    --print|--cat) mode=full; shift ;;
     --toc) mode=toc; shift ;;
     --list) mode=list; shift ;;
     --section) mode=section; want=${2:?--section needs a heading number or text}; shift 2 ;;
@@ -1111,7 +1111,7 @@ cmd_guide() {
   local f; f=$(guide_file "$here" "${name:-orchestrator}")
   case "$mode" in
     path) echo "$f" ;;
-    cat) cat "$f" ;;
+    full) cat "$f" ;;
     toc)
       guide_headings "$f" | awk -F'\t' '{n++; printf "%s%2d. %s\n", ($1==3?"    ":""), n, $2}'
       echo "next: orchestra-worker guide ${name:-orchestrator} --section <n>" ;;

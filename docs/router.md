@@ -50,15 +50,15 @@ cache. `ORCHESTRA_ROUTER_PER_MODEL=0` turns per-model routers off. Env model pin
 ## Thinking levels: frugal by default
 
 Reasoning tokens cost money and mostly do not improve mechanical work, so the router spends them only where
-they pay. The mapping is per profile (`tiers` in `PROFILE_DEFAULTS`):
+they pay. Every profile starts from one ladder, fitted to its model (below):
 
-| tier | ds / gemini / claude | flash (workers) |
+| tier | default | Flash (no `medium`) |
 |---|---|---|
 | routine | `off` | `off` |
 | standard | `low` | `low` |
 | deep | `medium` (`high` only when the virtual level is explicitly `high`) | `high` |
 
-These are defaults for a model family. At each request the router fits them to the physical model's real ladder
+This is a default, not a per-model table. At each request the router fits it to the physical model's real ladder
 (`fitConfigToModel`): levels the catalog model lacks are dropped, and when a tier no longer fits, the tiers are rebuilt
 on the model's own ladder as the per-model routers do. Claude 5.5 has no `off`, so its routine and standard turns run
 `low`; DeepSeek V4 Pro offers only `off` and `high`, so routine and standard run `off` and deep runs `high`. Without
