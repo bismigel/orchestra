@@ -1,7 +1,7 @@
 # Lessons
 
 Spec gaps found in review, one line each: what the spec missed, and the rule that would have caught it.
-`orchestra-refine` reads this file.
+Refining a task (`guide planning --section refine`) applies this file.
 
 - 2026-11-25 T2: the spec said to change "the two" README phrases about history; a third occurrence (wrapped over a
   line break) existed, and the worker correctly left it alone. Rule: when a spec changes wording, give the exact

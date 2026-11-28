@@ -33,8 +33,8 @@ D=$(case_dir default); run_install "$D/home" "$D/xdg"
 S="$D/home/.claude/skills"
 if [ "$RC" = 0 ]; then ok "default install succeeds"; else bad "default install failed (rc $RC): $OUT"; fi
 got=$(find "$S" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
-if [ "$got" = "orchestra orchestra-land orchestra-plan orchestra-refine " ]; then
-  ok "default links exactly orchestra, orchestra-plan, orchestra-refine"
+if [ "$got" = "orchestra orchestra-plan " ]; then
+  ok "default links exactly orchestra and orchestra-plan"
 else
   bad "default links are: $got"
 fi
@@ -49,7 +49,7 @@ D=$(case_dir with-ops); run_install "$D/home" "$D/xdg" --ops
 S="$D/home/.claude/skills"
 if [ "$RC" = 0 ]; then ok "--ops install succeeds"; else bad "--ops install failed (rc $RC): $OUT"; fi
 got=$(find "$S" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
-if [ "$got" = "ops-change ops-incident orchestra orchestra-land orchestra-plan orchestra-refine " ]; then
+if [ "$got" = "ops-change ops-incident orchestra orchestra-plan " ]; then
   ok "--ops adds ops-change and ops-incident"
 else
   bad "--ops links are: $got"

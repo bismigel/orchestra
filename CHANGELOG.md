@@ -1,6 +1,10 @@
 # Changelog
 
 ## 0.8.0 (unreleased)
+- **Fewer skills.** `orchestra-land` is folded into the `orchestra` skill and the orchestrator guide's Landing section
+(`guide orchestrator --section landing`), and `orchestra-refine` into `orchestra-plan` (refine stays documented in
+`guide planning --section refine`). `install.sh` installs `orchestra` and `orchestra-plan` (plus the two ops skills
+with `--ops`) and drops links to the removed skills. The `land` guide name is gone.
 - **Removed the `orchestra/auto` router** (`examples/pi/orchestra-router.ts`, `docs/router.md`, `tests/router.sh`)
 and `ORCHESTRA_ROUTER_EXT`. On Claude Code and Antigravity it could only set the level once per user turn, on Claude
 there is no `off` to save with, and its own benchmark showed a fixed `low` as cheap as routing for workers. Workers

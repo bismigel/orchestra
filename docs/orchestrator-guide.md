@@ -93,6 +93,11 @@ that makes them fail, and the test rows to add. Keep the rules you set non-negot
 protect data. After about three rounds, take the task over.
 
 ## Landing
+Land only a reviewed task: `review` shows no unanswered BLOCKING question, a reason for every file outside the
+task's paths, and a `candidate:` line from a passing prove (on `candidate drift:`, prove again first). Never push by
+hand, never force the base, never `git reset --soft` from a stale worktree. Afterwards set the task's `status: done`
+and report the commit or pull request, the proofs, the rounds and the cost.
+
 Workers cannot commit. `orchestra-worker land <task>` does it for you: it commits what is left, rebases onto
 `ORCHESTRA_BASE`, squashes (claim and wip commits are dropped; a message written on the branch is kept), proves the
 result, and pushes with `ORCHESTRA_PUSH_CMD` only if every check passes, adding `Proof:` trailers. If the worktree

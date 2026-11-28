@@ -1057,12 +1057,11 @@ cmd_doctor() {
 # guide with its title. --toc: one guide's headings, numbered. --section <n|text>: one section (a heading number from
 # --toc, or a case-insensitive part of the heading). --cat (= --print): the whole text. Text output never makes a
 # harness read a path outside its workspace.
-GUIDES="orchestrator planning ops land jev proofs security design harness"
+GUIDES="orchestrator planning ops jev proofs security design harness"
 guide_file() {
   local here=$1 name=$2
   case "$name" in
     orchestrator|orchestra) echo "$here/docs/orchestrator-guide.md" ;;
-    land) echo "$here/skills/claude-code/orchestra-land/SKILL.md" ;;
     planning|plan|refine) echo "$here/docs/planning-guide.md" ;;
     ops) echo "$here/docs/ops-guide.md" ;;
     security) echo "$here/docs/security.md" ;;

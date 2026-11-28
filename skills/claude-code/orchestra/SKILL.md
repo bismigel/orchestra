@@ -30,9 +30,9 @@ specs and never commit. This page is the loop. Details load on demand, one secti
    claim, a proof is evidence) and your own probes on anything risky. → `guide orchestrator --section review`
 5. **Feedback** as a table of failing cases (input, actual, required) plus the rule; after ~3 rounds finish it
    yourself. → `guide orchestrator --section feedback`
-6. **Land**: the `orchestra-land` skill, or `orchestra-worker land <id>` (`--pr` on a protected base). Tell the user
+6. **Land** a reviewed task: `orchestra-worker land <id>` (`--pr` on a protected base). Tell the user
    what landed, the rounds and the cost (`orchestra-worker summary <id>`), then append the spec gaps from
-   `orchestra-worker lessons <id>` to the lessons file. → `guide land --cat`
+   `orchestra-worker lessons <id>` to the lessons file. → `guide orchestrator --section landing`
 
 **When orchestra itself is wrong** (a bug, a misleading message, a missing guard in `orchestra-worker`, a skill or the
 pi extension; not a spec gap, which goes to lessons): open an issue on `bismigel/orchestra` right away, without

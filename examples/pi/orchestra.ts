@@ -331,7 +331,7 @@ export default function (pi) {
       "name: that guide's sections. Add section (a heading or its number) for one section; full=true for the whole " +
       "guide (large).",
     parameters: Type.Object({
-      name: Type.Optional(Type.String({ description: "Guide: orchestrator, planning, ops, land, jev, proofs, security, design, harness" })),
+      name: Type.Optional(Type.String({ description: "Guide: orchestrator, planning, ops, jev, proofs, security, design, harness" })),
       section: Type.Optional(Type.String({ description: "Section heading (a substring is enough) or its number" })),
       full: Type.Optional(Type.Boolean({ description: "The whole guide" })),
       cwd: cwdParam,
