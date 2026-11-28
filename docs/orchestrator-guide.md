@@ -134,3 +134,43 @@ run state. It exits 1 on anything that would break a run.
 `git reset --soft origin/main` from it silently reverts every file that changed on `main` since. `land` rebases
 first, then squashes onto the base it just rebased on, which is safe. (This happened in the first production pilot
 before `land` existed: a squash reverted unrelated docs.)
+
+## When orchestra itself is wrong
+A bug in `orchestra-worker`, `orchestra-task`, a prompt, a skill or the pi extension (a crash, a wrong exit code, a
+misleading message, a guard that let something through, a test that flakes) is reported where it can be fixed: an
+issue on `bismigel/orchestra`. A spec gap is not an orchestra bug; it goes to the lessons file. Open the issue as
+soon as you have the evidence, without asking first, then carry on with the task (work around it if you can, and say
+so in the issue).
+
+1. **Check for a duplicate**: `gh issue list --repo bismigel/orchestra --state all --search "<words>"`. If one exists,
+   add your replication as a comment (`gh issue comment <n>`) instead of opening a new issue.
+2. **Replicate it in a throwaway repository**, not in the user's: `git init` a temp dir, the smallest spec or command
+   that shows the problem, and the fake harness (`ORCHESTRA_HARNESS=<orchestra>/tests/fixtures/fake-harness.sh`) when
+   no model is needed. If it only shows in a real run, quote the commands and the relevant output lines instead.
+3. **Find a possible fix**: the file and line, why it happens, and a short diff or a description of the change, with
+   the test that would catch it (`tests/<suite>.sh`).
+4. **Redact**: the repository is public. No secrets or tokens, no private hostnames, IPs, repository or customer
+   names, personal data or file contents from the user's project. Use placeholders (`<repo>`, `example.com`).
+5. **Open it**: `gh issue create --repo bismigel/orchestra --label bug --title "<what is wrong, in one line>"
+   --body-file <file>`, with these parts:
+
+~~~markdown
+**What happened**
+One paragraph: what you ran, what you expected, what you got.
+
+**Replication**
+orchestra <git -C <orchestra> rev-parse --short HEAD>, harness <pi version>, OS
+```sh
+<commands from an empty temp dir to the failure>
+```
+Output (trimmed): ...
+
+**Possible fix**
+`<file>:<line>`: why it happens, and the change (a short diff). Test: `tests/<suite>.sh` case "<name>".
+
+**Workaround**
+What you did meanwhile, if anything.
+~~~
+
+Tell the user the issue URL in your next message. Fixing it is a separate task (a pull request), not part of filing.
+

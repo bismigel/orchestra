@@ -34,5 +34,9 @@ specs and never commit. This page is the loop. Details load on demand, one secti
    what landed, the rounds and the cost (`orchestra-worker summary <id>`), then append the spec gaps from
    `orchestra-worker lessons <id>` to the lessons file. → `guide land --cat`
 
+**When orchestra itself is wrong** (a bug, a misleading message, a missing guard in `orchestra-worker`, a skill or the
+pi extension; not a spec gap, which goes to lessons): open an issue on `bismigel/orchestra` right away, without
+asking, with a replication and a possible fix. → `orchestra-worker guide orchestrator --section "orchestra itself"`
+
 On demand, not by default: `orchestra-worker guide jev` (the `decide` second opinion), `guide ops`
 (infrastructure), `guide planning` (plan and refine a board).
