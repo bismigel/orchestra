@@ -23,23 +23,11 @@ main() {
   git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
   cd "$repo"
 
-  # 1. guide --cat prints the text; guide land names the skill file.
+  # 1. guide --cat prints the text.
   local rc=0
   "$W" guide orchestrator --cat > "$tmp/guide.out" 2>&1 || rc=$?
   if [ "$rc" = 0 ] && cmp -s "$tmp/guide.out" "$root/docs/orchestrator-guide.md"; then
     ok "guide orchestrator --cat prints docs/orchestrator-guide.md"; else bad "guide orchestrator --cat differs (rc $rc)"; fi
-  rc=0
-  "$W" guide land --cat > "$tmp/guide.out" 2>&1 || rc=$?
-  if [ "$rc" = 0 ] && cmp -s "$tmp/guide.out" "$root/skills/claude-code/orchestra-land/SKILL.md"; then
-    ok "guide land --cat prints the orchestra-land skill"; else bad "guide land --cat differs (rc $rc)"; fi
-  rc=0
-  "$W" guide land > "$tmp/guide.out" 2>&1 || rc=$?
-  local land_path=""; land_path=$(cat "$tmp/guide.out") || true
-  case "$land_path" in
-    */orchestra-land/SKILL.md) [ "$rc" = 0 ] && ok "guide land prints a path to orchestra-land/SKILL.md" \
-      || bad "guide land printed $land_path (rc $rc)" ;;
-    *) bad "guide land printed $land_path, want a path ending in orchestra-land/SKILL.md (rc $rc)" ;;
-  esac
 
   export ORCHESTRA_MODEL=fake/worker-1 ORCHESTRA_ALLOWED_MODELS=fake/worker-1
   export ORCHESTRA_HARNESS="$root/tests/fixtures/fake-harness.sh" ORCHESTRA_TIMEOUT=60s

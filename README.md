@@ -198,7 +198,7 @@ Workers do better work from better specs, so orchestra also helps you write them
   MVP line, architecture, HTML wireframes, and a board of worker-ready tasks. Checkpoints you approve; the planning
   pack in the repository is the state. See [docs/planning-guide.md](docs/planning-guide.md) and
   [templates/](templates/).
-- **`refine`** (skill `orchestra-refine`): brings tasks up to the definition of ready. Its mechanical half is a CLI
+- **`refine`** (also skill `orchestra-plan`): brings tasks up to the definition of ready. Its mechanical half is a CLI
   (`orchestra-task lint`: front matter, ownership overlaps, paths, runnable acceptance, `proof:` lines,
   dependencies, out of scope), the legwork half is the scout, and the judgment half is yours.
 - **`scout`**: before a spec is final, `orchestra-worker scout <id> --spec draft.md` sends a read-only worker to
@@ -238,7 +238,7 @@ Exit codes: `0` ok · `2` refused or misconfigured · `3` a disallowed model ans
 `5` over budget · `124` timed out · `130` stopped.
 
 ### Make it the default in Claude Code
-`install.sh` installs the skills (`/orchestra`, `/orchestra-land`, `/orchestra-plan`, `/orchestra-refine`). To have every session use
+`install.sh` installs the skills (`/orchestra`, `/orchestra-plan`). To have every session use
 them, add one line to `~/.claude/CLAUDE.md`:
 ```
 - Delegate mechanical coding work with the orchestra skill: I decide and review; workers only implement settled specs.
