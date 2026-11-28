@@ -14,3 +14,6 @@ Refining a task (`guide planning --section refine`) applies this file.
 - 2026-11-28 T4: a new check in front of `run` (pre-run lint) broke another suite whose fixture specs are minimal on
   purpose (tests/freshness.sh). Rule: a task that adds a gate to a command lists in Touches every suite that calls that
   command with a fixture spec (`grep -l 'run .*--spec' tests/*.sh`), and says how each should pass.
+- 2026-11-28 T5: the spec said herdr output must never reach orchestra-worker's output, but no acceptance case
+  checked it, and the worker silenced only stderr. Rule: every "never" or "must not" in Decisions gets its own
+  acceptance case that would fail if it broke (here: a fake that prints a marker, and an assert the marker is absent).
