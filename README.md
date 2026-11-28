@@ -245,6 +245,8 @@ them, add one line to `~/.claude/CLAUDE.md`:
 ```
 pi: link [examples/pi/orchestra.ts](examples/pi/orchestra.ts) and [examples/pi/workers.ts](examples/pi/workers.ts)
 into `~/.pi/agent/extensions/`.
+Running inside [herdr](https://herdr.dev)? Worker runs get a live watch pane and a notification when they end, with
+nothing to configure (`ORCHESTRA_HERDR=auto|notify|off`); herdr is never required.
 An optional second opinion from a classifier model (Jev) flags specs that may not be settled and runs that deserve a
 closer look (`orchestra-worker decide`); it can only raise attention, and is off by default: see
 [docs/jev.md](docs/jev.md).

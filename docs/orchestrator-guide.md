@@ -33,6 +33,11 @@ When `ORCHESTRA_WORKTREE_CMD` pushes a claim branch you may not push yet, `run -
 `ORCHESTRA_WORKTREE_LOCAL=1`) creates a plain local worktree instead; the push waits for `land`. Never fall back to a
 hand-made `git worktree add`: it skips lint and the worker.
 
+**Inside herdr** (https://herdr.dev, `HERDR_ENV=1`), `run` and `scout` open a small pane below yours with
+`orchestra-worker watch <task>` that closes itself when the run ends, and show a herdr notification with the exit.
+herdr is optional: outside a herdr pane nothing changes, and a herdr failure never changes an exit code.
+`ORCHESTRA_HERDR=notify` keeps only the notification, `off` turns both off. Do not open your own watch pane.
+
 Guides load a piece at a time: `orchestra-worker guide --list`, `guide <name> --toc`, `guide <name> --section <n>`,
 or `--cat` for the whole text (pi: the `orchestra_guide` tool). They print text, so a harness that guards paths
 outside its workspace never has to read the skill's symlink target.
