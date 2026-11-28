@@ -87,7 +87,8 @@ load_config() {
   ORCHESTRA_PROFILE=${ORCHESTRA_PROFILE:-dev}   # dev | ops (prompts/worker-<profile>.md, lint rules)
   ORCHESTRA_MODEL=${ORCHESTRA_MODEL:-}
   ORCHESTRA_ALLOWED_MODELS=${ORCHESTRA_ALLOWED_MODELS:-$ORCHESTRA_MODEL}
-  ORCHESTRA_ROUTER_EXT=${ORCHESTRA_ROUTER_EXT:-}            # virtual-model router extension (orchestra/auto)
+  # The orchestra/auto router was removed in 0.8: a leftover setting is a clear error, not a silent no-op.
+  [ -z "${ORCHESTRA_ROUTER_EXT:-}" ] || die "ORCHESTRA_ROUTER_EXT was removed (0.8): unset it and set ORCHESTRA_MODEL to a real model, e.g. deepseek/deepseek-flash with ORCHESTRA_THINKING=low"
   ORCHESTRA_THINKING=${ORCHESTRA_THINKING:-low}
   ORCHESTRA_TIMEOUT=${ORCHESTRA_TIMEOUT:-45m}
   ORCHESTRA_KEY_ENV=${ORCHESTRA_KEY_ENV:-}
@@ -177,12 +178,7 @@ cmd_run() {
   [ -f "$harness_file" ] || die "unknown harness '$ORCHESTRA_HARNESS' (lib/harness/*.sh, or a path to a .sh file)"
   # shellcheck disable=SC1090
   . "$harness_file"
-  if [ -n "$ORCHESTRA_ROUTER_EXT" ]; then
-    [ -f "$ORCHESTRA_ROUTER_EXT" ] || die "ORCHESTRA_ROUTER_EXT not found: $ORCHESTRA_ROUTER_EXT"
-    ORCHESTRA_ROUTER_EXT=$(realpath "$ORCHESTRA_ROUTER_EXT")
-  else
-    model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
-  fi
+  model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
 
   # A spec on the task board is linted before the worktree, so a broken spec costs no worker run. Only a first run
   # with --spec: --prompt has no board file, and --feedback is a later round on an already accepted spec.
@@ -660,8 +656,6 @@ build_sandbox() {
     _sb+=(--bind "$state/home" "$home" --bind "$wt" "$wt" --ro-bind "$common" "$common" --bind "$gitdir" "$gitdir")
   fi
   local pair src dst ro_binds="$ORCHESTRA_RO_BINDS"
-  # The router extension is a file, not a bind directory; mount it at the same absolute path the pi argv names.
-  [ -n "${ORCHESTRA_ROUTER_EXT:-}" ] && ro_binds="$ro_binds $ORCHESTRA_ROUTER_EXT:$ORCHESTRA_ROUTER_EXT"
   for pair in $ro_binds; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
     [ -e "$src" ] || [ "${DRY_RUN:-}" = 1 ] || mkdir -p "$src"; _sb+=(--ro-bind "$src" "$dst"); done
   for pair in $ORCHESTRA_RW_BINDS; do src=${pair%%:*}; dst=${pair#*:}; src=${src/#\~/$HOME}; dst=${dst/#\~/$home}
@@ -979,14 +973,8 @@ cmd_doctor() {
   done
   # Model
   if [ -z "$ORCHESTRA_MODEL" ]; then fail_ "ORCHESTRA_MODEL is not set"
-  elif [ -n "$ORCHESTRA_ROUTER_EXT" ]; then ok_ "model $ORCHESTRA_MODEL (virtual model; physical models checked post-run against ORCHESTRA_ALLOWED_MODELS)"
   elif model_allowed "$ORCHESTRA_MODEL"; then ok_ "model $ORCHESTRA_MODEL (allowed: $ORCHESTRA_ALLOWED_MODELS)"
   else fail_ "model $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS ($ORCHESTRA_ALLOWED_MODELS)"; fi
-  if [ -n "$ORCHESTRA_ROUTER_EXT" ]; then
-    if [ -f "$ORCHESTRA_ROUTER_EXT" ]; then
-      ok_ "router extension: $ORCHESTRA_ROUTER_EXT (physical models checked post-run against ORCHESTRA_ALLOWED_MODELS)"
-    else fail_ "router extension: $ORCHESTRA_ROUTER_EXT not found"; fi
-  fi
   # Harness
   local hf="$here/lib/harness/$ORCHESTRA_HARNESS.sh"
   case "$ORCHESTRA_HARNESS" in */*) hf=$(realpath -m "$ORCHESTRA_HARNESS") ;; esac
@@ -1069,7 +1057,7 @@ cmd_doctor() {
 # guide with its title. --toc: one guide's headings, numbered. --section <n|text>: one section (a heading number from
 # --toc, or a case-insensitive part of the heading). --cat (= --print): the whole text. Text output never makes a
 # harness read a path outside its workspace.
-GUIDES="orchestrator planning ops land jev router proofs security design harness"
+GUIDES="orchestrator planning ops land jev proofs security design harness"
 guide_file() {
   local here=$1 name=$2
   case "$name" in
@@ -1081,7 +1069,6 @@ guide_file() {
     proofs) echo "$here/docs/proofs.md" ;;
     design) echo "$here/docs/design.md" ;;
     harness) echo "$here/docs/adding-a-harness.md" ;;
-    router) echo "$here/docs/router.md" ;;
     jev|decide) echo "$here/docs/jev.md" ;;
     *) die "unknown guide '$name' (${GUIDES// /, }, templates)" ;;
   esac
@@ -1209,12 +1196,7 @@ cmd_scout() {
   [ -f "$harness_file" ] || die "unknown harness '$ORCHESTRA_HARNESS' (lib/harness/*.sh, or a path to a .sh file)"
   # shellcheck disable=SC1090
   . "$harness_file"
-  if [ -n "$ORCHESTRA_ROUTER_EXT" ]; then
-    [ -f "$ORCHESTRA_ROUTER_EXT" ] || die "ORCHESTRA_ROUTER_EXT not found: $ORCHESTRA_ROUTER_EXT"
-    ORCHESTRA_ROUTER_EXT=$(realpath "$ORCHESTRA_ROUTER_EXT")
-  else
-    model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
-  fi
+  model_allowed "$ORCHESTRA_MODEL" || die "ORCHESTRA_MODEL $ORCHESTRA_MODEL is not in ORCHESTRA_ALLOWED_MODELS"
 
   # A spec on the task board is linted first, but a scout reads a draft: problems are reported, never fatal.
   if [ -n "$spec" ]; then
