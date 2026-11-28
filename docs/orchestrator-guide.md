@@ -33,8 +33,9 @@ When `ORCHESTRA_WORKTREE_CMD` pushes a claim branch you may not push yet, `run -
 `ORCHESTRA_WORKTREE_LOCAL=1`) creates a plain local worktree instead; the push waits for `land`. Never fall back to a
 hand-made `git worktree add`: it skips lint and the worker.
 
-Guides print as text with `orchestra-worker guide <name> --cat` (orchestrator, planning, ops, land, jev, …), so a
-harness that guards paths outside its workspace never has to read the skill's symlink target.
+Guides load a piece at a time: `orchestra-worker guide --list`, `guide <name> --toc`, `guide <name> --section <n>`,
+or `--cat` for the whole text (pi: the `orchestra_guide` tool). They print text, so a harness that guards paths
+outside its workspace never has to read the skill's symlink target.
 
 Before a first run, `run` compares the worktree with `ORCHESTRA_BASE`: a worktree with no work yet is rebased onto
 it automatically, while one with work is refused (exit 2) when the task's spec changed on the base, so the worker

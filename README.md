@@ -231,7 +231,7 @@ rotation) and `ops-incident`. They are installed only with `./install.sh --ops`.
 | `orchestra-worker lessons <id>` | draft lessons lines from what the spec missed |
 | `orchestra-worker artifact <id>` | collect a task's report, diff and proofs as an artifact (`--local`, `--open`) |
 | `orchestra-worker clean` / `history` | archive and remove landed worktrees / every task's runs, tokens and cost |
-| `orchestra-worker doctor` / `guide <name>` | check the setup / print a guide's path |
+| `orchestra-worker doctor` / `guide --list` / `guide <name> --toc` | check the setup / read a guide a piece at a time |
 | `orchestra-task lint` | the mechanical half of the definition of ready |
 
 Exit codes: `0` ok · `2` refused or misconfigured · `3` a disallowed model answered · `4` no valid report ·
